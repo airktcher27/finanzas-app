@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Finanzas">
+  <title>Finanzas</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="file-warning" hidden style="background:#fef3c7;color:#78350f;padding:12px 14px;border-radius:10px;margin:12px 0;font-size:.95rem">
+    <strong>Esta página no funciona abriendo el archivo directamente.</strong>
+    Ábrela desde un servidor: en esta carpeta ejecuta <code>python3 -m http.server 8000</code> y entra a
+    <code>http://localhost:8000</code>, o publícala en GitHub Pages (ver README).
+  </div>
+  <script>
+    if (location.protocol === 'file:') document.getElementById('file-warning').hidden = false;
+  </script>
+  <header class="top">
+    <h1>Finanzas</h1>
+    <button id="btn-sync" class="btn primary" type="button" aria-label="Sincronizar">⟳ Sincronizar</button>
+  </header>
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+
+  <nav class="tabs">
+    <button type="button" data-tab="notas" class="active">Pruebas</button>
+    <button type="button" data-tab="ajustes">Ajustes</button>
+  </nav>
+
+  <main>
+    <section id="tab-notas">
+      <p class="hint">Fase 0: estas notas son solo para comprobar que el PC y el celular se sincronizan. Crea una aquí, sincroniza y mírala en el otro dispositivo.</p>
+      <form id="note-form" class="row">
+        <input id="note-input" type="text" placeholder="Escribe una nota de prueba…" autocomplete="off" required>
+        <button class="btn primary" type="submit">Añadir</button>
+      </form>
+      <ul id="notes" class="list"></ul>
+      <p id="notes-empty" class="hint" hidden>Aún no hay notas.</p>
+    </section>
+
+    <section id="tab-ajustes" hidden>
+      <h2>Sincronización con GitHub</h2>
+      <p class="hint">Tus datos se cifran en este dispositivo antes de subirse. Usa el mismo usuario, repositorio, token y contraseña en el PC y en el celular.</p>
+      <form id="cfg-form" class="form" autocomplete="off">
+        <label>Usuario de GitHub
+          <input id="cfg-owner" type="text" autocapitalize="off" spellcheck="false" required>
+        </label>
+        <label>Repositorio de datos (privado)
+          <input id="cfg-repo" type="text" autocapitalize="off" spellcheck="false" placeholder="finanzas-datos" required>
+        </label>
+        <label>Rama
+          <input id="cfg-branch" type="text" autocapitalize="off" spellcheck="false" placeholder="main">
+        </label>
+        <label>Archivo
+          <input id="cfg-path" type="text" autocapitalize="off" spellcheck="false" placeholder="datos.enc.json">
+        </label>
+        <label>Token de acceso (fine-grained)
+          <input id="cfg-token" type="password" autocapitalize="off" spellcheck="false" required>
+        </label>
+        <div class="row wrap">
+          <button class="btn primary" type="submit">Guardar y sincronizar</button>
+          <button id="btn-forget-key" class="btn" type="button">Olvidar contraseña en este dispositivo</button>
+        </div>
+      </form>
+
+      <h2>Respaldo manual</h2>
+      <p class="hint">Archivo cifrado con su propia contraseña. Sirve como copia de seguridad o para pasar datos sin internet.</p>
+      <div class="row wrap">
+        <button id="btn-export" class="btn" type="button">Exportar respaldo</button>
+        <button id="btn-import" class="btn" type="button">Importar respaldo</button>
+        <input id="file-import" type="file" accept=".json,application/json" hidden>
+      </div>
+
+      <h2>Este dispositivo</h2>
+      <p class="hint" id="device-info"></p>
+    </section>
+  </main>
+
+  <dialog id="pass-dialog">
+    <form method="dialog" id="pass-form" class="form">
+      <h3 id="pass-title">Contraseña de cifrado</h3>
+      <p id="pass-text" class="hint"></p>
+      <label>Contraseña
+        <input id="pass-1" type="password" autocomplete="off" required>
+      </label>
+      <label id="pass-2-wrap">Repite la contraseña
+        <input id="pass-2" type="password" autocomplete="off">
+      </label>
+      <p id="pass-error" class="error" hidden></p>
+      <div class="row end">
+        <button id="pass-cancel" class="btn" type="button">Cancelar</button>
+        <button class="btn primary" type="submit">Aceptar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
