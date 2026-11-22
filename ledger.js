@@ -140,3 +140,73 @@ export function addDays(dateStr, n) {
   const [y, m, d] = dateStr.split('-').map(Number);
   return todayStr(new Date(y, m - 1, d + n));
 }
+
+// ---------- Tarjetas de crédito: corte y pago ----------
+// Con el día de corte y el día de pago se calcula cuánto toca pagar y cuándo:
+//  - El próximo pago es el próximo "día de pago" desde hoy.
+//  - Ese pago corresponde al último corte anterior a esa fecha.
+//  - Si ese corte ya ocurrió, se paga la deuda que había al corte menos lo que ya abonaste después.
+//    Las compras posteriores al corte van al siguiente extracto.
+//  - Si el corte aún no ocurre, es un estimado: lo que debes hasta hoy (puede crecer hasta el corte).
+const lastDayOf = (y, m) => new Date(y, m, 0).getDate();
+const mkDate = (y, m, day) => `${y}-${pad(m)}-${pad(Math.min(day, lastDayOf(y, m)))}`;
+const monthAdd = (y, m, delta) => {
+  const d = new Date(y, m - 1 + delta, 1);
+  return [d.getFullYear(), d.getMonth() + 1];
+};
+
+export function nextDayOnOrAfter(dateStr, day) {
+  const [y, m] = dateStr.split('-').map(Number);
+  const c = mkDate(y, m, day);
+  if (c >= dateStr) return c;
+  const [y2, m2] = monthAdd(y, m, 1);
+  return mkDate(y2, m2, day);
+}
+
+export function prevDayBefore(dateStr, day) {
+  const [y, m] = dateStr.split('-').map(Number);
+  const c = mkDate(y, m, day);
+  if (c < dateStr) return c;
+  const [y2, m2] = monthAdd(y, m, -1);
+  return mkDate(y2, m2, day);
+}
+
+function effectsOn(accId, movs, flows) {
+  const out = [];
+  for (const m of movs) {
+    if (m.kind === 'ingreso' && m.accountId === accId) out.push({ date: m.date, effect: m.amount });
+    else if (m.kind === 'gasto' && m.accountId === accId) out.push({ date: m.date, effect: -m.amount });
+    else if (m.kind === 'transferencia') {
+      if (m.accountId === accId) out.push({ date: m.date, effect: -m.amount });
+      if (m.toAccountId === accId) out.push({ date: m.date, effect: m.toAmount ?? m.amount });
+    }
+  }
+  for (const f of flows) if (f.accountId === accId) out.push({ date: f.date, effect: f.effect });
+  return out;
+}
+
+export function cardCycle(acc, movs, flows, today) {
+  const cutDay = Number(acc.cutDay);
+  const payDay = Number(acc.payDay);
+  if (!(cutDay >= 1 && cutDay <= 31 && payDay >= 1 && payDay <= 31)) return null;
+  const due = nextDayOnOrAfter(today, payDay);
+  const cut = prevDayBefore(due, cutDay);
+  const nextCut = nextDayOnOrAfter(today, cutDay);
+  const cutPassed = cut <= today;
+  const eff = effectsOn(acc.id, movs, flows);
+  const balanceAt = (date) => (acc.openingBalance || 0) + eff.filter((e) => e.date <= date).reduce((s, e) => s + e.effect, 0);
+
+  if (!cutPassed) {
+    return { due, cut, nextCut, cutPassed, estimate: true, toPay: Math.max(0, -balanceAt(today)), newCharges: 0 };
+  }
+  const debtAtCut = Math.max(0, -balanceAt(cut));
+  let paid = 0;
+  let newCharges = 0;
+  for (const e of eff) {
+    if (e.date > cut && e.date <= today) {
+      if (e.effect > 0) paid += e.effect;
+      else newCharges -= e.effect;
+    }
+  }
+  return { due, cut, nextCut, cutPassed, estimate: false, toPay: Math.max(0, debtAtCut - paid), newCharges };
+}

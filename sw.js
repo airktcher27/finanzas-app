@@ -1,6 +1,6 @@
 // Service worker: la app abre sin internet.
 // Con conexión siempre pide la versión más reciente; sin conexión usa la copia guardada.
-const CACHE = 'finanzas-v0.3.0';
+const CACHE = 'finanzas-v0.3.1';
 const ASSETS = [
   './', './index.html', './style.css', './app.js', './store.js', './crypto.js', './merge.js',
   './github.js', './sync.js', './errors.js', './money.js', './ledger.js', './defaults.js',

@@ -98,6 +98,15 @@ Pestaña **Deudas** para lo que te deben (*Me deben*) y lo que debes a personas 
 - **Movimientos** también lista los préstamos y abonos que tocan una cuenta, para que cada cambio de saldo tenga explicación. No cuentan como ingreso ni gasto del mes.
 - Al **eliminar una deuda** se borran sus abonos y se revierte su efecto en las cuentas.
 
+### Corte y pago de tarjetas
+
+En una tarjeta de crédito (editar cuenta) puedes poner el **día de corte** y el **día límite de pago**. Con eso:
+
+- La fila de la tarjeta muestra el próximo pago y cuánto toca pagar, y la fecha del próximo corte.
+- Si el corte de ese pago ya ocurrió, el monto es la deuda que había al corte menos lo que has abonado desde entonces. Las compras posteriores al corte van al siguiente extracto.
+- Si el corte aún no ocurre, el monto es un estimado ("aprox."): lo que debes hasta hoy, que puede crecer hasta el corte.
+- Si el pago vence en los próximos 7 días, aparece en **Vencimientos** del Resumen. Al tocarlo se abre una transferencia hacia la tarjeta con el monto ya puesto; eliges desde qué cuenta pagas.
+
 ## Pruebas
 
 - `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos y respaldo).

@@ -5,11 +5,11 @@ import { SyncError } from './errors.js';
 import { parseAmount, formatMoney, toInput, CURRENCIES } from './money.js';
 import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
-  debtFlows, debtRemaining, debtIsDone, debtTotals, addDays,
+  debtFlows, debtRemaining, debtIsDone, debtTotals, addDays, cardCycle,
 } from './ledger.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.3.0 (Fase 2)';
+const VERSION = '0.3.1 (Fase 2 + corte de tarjetas)';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
 
@@ -191,6 +191,12 @@ async function loadData() {
   const debtIds = new Set(debts.map((x) => x.id));
   const abonos = live(all, 'abonos').filter((a) => debtIds.has(a.debtId));
   const flows = debtFlows(debts, abonos);
+  const cycles = new Map();
+  for (const a of accounts) {
+    if (a.type !== 'credito' || a.archived) continue;
+    const c = cardCycle(a, movs, flows, todayStr());
+    if (c) cycles.set(a.id, c);
+  }
   return {
     accounts,
     cats,
@@ -198,6 +204,7 @@ async function loadData() {
     debts,
     abonos,
     flows,
+    cycles,
     debtTot: debtTotals(debts, abonos),
     balances: accountBalances(accounts, movs, flows),
     accById: new Map(accounts.map((a) => [a.id, a])),
@@ -247,9 +254,26 @@ function accountRow(a, d) {
     amt = formatMoney(bal, a.currency);
     if (bal < 0) cls = 'neg';
   }
+  const c = d.cycles.get(a.id);
+  const sub2 = c
+    ? `Pago ${shortDate(c.due)}: ${c.toPay > 0 ? formatMoney(c.toPay, a.currency) + (c.estimate ? ' (aprox.)' : '') : 'nada por pagar'} · Corte ${shortDate(c.nextCut)}`
+    : null;
   return h('button', { type: 'button', class: 'item' + (a.archived ? ' archived' : ''), onclick: () => openAccountForm(a) },
-    h('div', { class: 'main' }, h('div', { class: 'title', text: a.name }), h('div', { class: 'sub', text: sub })),
+    h('div', { class: 'main' },
+      h('div', { class: 'title', text: a.name }),
+      h('div', { class: 'sub', text: sub }),
+      sub2 && h('div', { class: 'sub', text: sub2 })),
     h('div', { class: 'amt ' + cls, text: amt }));
+}
+
+// Pago próximo de una tarjeta: al tocarlo abre una transferencia hacia la tarjeta con el monto puesto.
+function cardDueRow(a, c) {
+  return h('button', { type: 'button', class: 'item',
+    onclick: () => openMovForm(null, { kind: 'transferencia', toAccountId: a.id, amount: toInput(c.toPay, a.currency) }) },
+    h('div', { class: 'main' },
+      h('div', { class: 'title', text: a.name }),
+      h('div', { class: 'sub', text: `Pago de tarjeta · ${c.cutPassed ? 'cortó' : 'corta'} el ${shortDate(c.cut)}${c.estimate ? ' (monto aprox.)' : ''}` })),
+    h('div', { class: 'amt neg' }, formatMoney(c.toPay, a.currency), h('small', { text: 'Vence ' + shortDate(c.due) })));
 }
 
 function renderResumen(d) {
@@ -280,11 +304,18 @@ function renderResumen(d) {
   }
   root.append(cards);
 
-  const soon = d.debts
-    .filter((x) => !debtIsDone(x, d.abonos) && x.dueDate && x.dueDate <= addDays(todayStr(), 7))
-    .sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1));
+  const limit = addDays(todayStr(), 7);
+  const soon = [];
+  for (const x of d.debts) {
+    if (!debtIsDone(x, d.abonos) && x.dueDate && x.dueDate <= limit) soon.push({ date: x.dueDate, el: debtRow(x, d) });
+  }
+  for (const a of d.accounts) {
+    const c = d.cycles.get(a.id);
+    if (c && c.toPay > 0 && c.due <= limit) soon.push({ date: c.due, el: cardDueRow(a, c) });
+  }
   if (soon.length) {
-    root.append(h('div', { class: 'section-title', text: 'Vencimientos' }), h('div', { class: 'list' }, soon.map((x) => debtRow(x, d))));
+    soon.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    root.append(h('div', { class: 'section-title', text: 'Vencimientos' }), h('div', { class: 'list' }, soon.map((s) => s.el)));
   }
 
   const active = d.accounts.filter((a) => !a.archived);
@@ -447,7 +478,7 @@ async function createSuggested() {
   setStatus('Cuentas creadas con saldo en cero. Toca cada una para poner su saldo inicial (o la deuda, en las tarjetas).', 'ok');
 }
 
-async function openMovForm(existing) {
+async function openMovForm(existing, preset) {
   const d = ui.data;
   if (!d) return;
   const usable = d.accounts.filter((a) => !a.archived || (existing && (existing.accountId === a.id || existing.toAccountId === a.id)));
@@ -480,6 +511,16 @@ async function openMovForm(existing) {
         amount: '',
         toAmount: '',
       };
+  if (!existing && preset) {
+    Object.assign(s, preset);
+    if (s.accountId === s.toAccountId) {
+      // Como origen del pago, una cuenta que no sea la tarjeta (de la misma moneda si se puede).
+      const toCur = curOf(s.toAccountId);
+      const from = usable.find((a) => a.id !== s.toAccountId && a.type !== 'credito' && a.currency === toCur)
+        || usable.find((a) => a.id !== s.toAccountId);
+      if (from) s.accountId = from.id;
+    }
+  }
 
   const body = h('div');
   const err = h('p', { class: 'error', hidden: true });
@@ -817,16 +858,18 @@ function openAccountForm(existing) {
         currency: existing.currency,
         opening: toInput(existing.type === 'credito' ? -(existing.openingBalance || 0) : existing.openingBalance || 0, existing.currency),
         limit: existing.creditLimit ? toInput(existing.creditLimit, existing.currency) : '',
+        cutDay: existing.cutDay ? String(existing.cutDay) : '',
+        payDay: existing.payDay ? String(existing.payDay) : '',
         archived: !!existing.archived,
       }
-    : { name: '', type: 'debito', currency: 'COP', opening: '', limit: '', archived: false };
+    : { name: '', type: 'debito', currency: 'COP', opening: '', limit: '', cutDay: '', payDay: '', archived: false };
 
   const body = h('div');
   const err = h('p', { class: 'error', hidden: true });
   const read = () => {
     const f = body.querySelector('form');
     if (!f) return;
-    for (const k of ['name', 'type', 'currency', 'opening', 'limit']) if (f.elements[k]) s[k] = f.elements[k].value;
+    for (const k of ['name', 'type', 'currency', 'opening', 'limit', 'cutDay', 'payDay']) if (f.elements[k]) s[k] = f.elements[k].value;
     if (f.elements.archived) s.archived = f.elements.archived.checked;
   };
   const rebuild = () => { read(); build(); };
@@ -840,6 +883,18 @@ function openAccountForm(existing) {
     const parsed = parseAmount(s.opening, s.currency, { signed: !credit }) ?? 0;
     const openingBalance = credit ? -Math.abs(parsed) : parsed;
     const creditLimit = credit && s.limit.trim() ? parseAmount(s.limit, s.currency) : null;
+    let cutDay = null;
+    let payDay = null;
+    if (credit && (s.cutDay.trim() || s.payDay.trim())) {
+      cutDay = Number(s.cutDay);
+      payDay = Number(s.payDay);
+      const okDay = (n) => Number.isInteger(n) && n >= 1 && n <= 31;
+      if (!okDay(cutDay) || !okDay(payDay)) {
+        err.textContent = 'Para el corte y el pago pon ambos días, entre 1 y 31 (o deja los dos vacíos).';
+        err.hidden = false;
+        return;
+      }
+    }
     closeSheet();
     await saveRecord({
       ...(existing || {}),
@@ -850,6 +905,8 @@ function openAccountForm(existing) {
       currency: s.currency,
       openingBalance,
       creditLimit,
+      cutDay,
+      payDay,
       archived: !!s.archived,
       deleted: false,
       createdAt: existing ? existing.createdAt : Date.now(),
@@ -871,6 +928,11 @@ function openAccountForm(existing) {
         h('input', { type: 'text', name: 'opening', inputmode: 'decimal', placeholder: '0', autocomplete: 'off', value: s.opening })),
       credit && h('label', {}, 'Cupo total (opcional)',
         h('input', { type: 'text', name: 'limit', inputmode: 'decimal', placeholder: 'Para ver cuánto te queda disponible', autocomplete: 'off', value: s.limit })),
+      credit && h('div', { class: 'row' },
+        h('label', { style: 'flex:1' }, 'Día de corte',
+          h('input', { type: 'text', name: 'cutDay', inputmode: 'numeric', maxlength: '2', placeholder: 'Ej. 24', autocomplete: 'off', value: s.cutDay })),
+        h('label', { style: 'flex:1' }, 'Día límite de pago',
+          h('input', { type: 'text', name: 'payDay', inputmode: 'numeric', maxlength: '2', placeholder: 'Ej. 14', autocomplete: 'off', value: s.payDay }))),
       existing && h('label', { class: 'check' },
         h('input', { type: 'checkbox', name: 'archived', checked: s.archived }), 'Archivada (la oculta del resumen y de los formularios)'),
     ];

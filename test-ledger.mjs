@@ -131,4 +131,47 @@ assert.equal(addDays('2026-11-28', 5), '2026-12-03');
 assert.equal(addDays('2026-12-30', 3), '2027-01-02');
 ok('suma de días');
 
+
+// --- tarjetas: corte y pago ---
+import { cardCycle, nextDayOnOrAfter, prevDayBefore } from './ledger.js';
+assert.equal(nextDayOnOrAfter('2026-11-22', 14), '2026-12-14');
+assert.equal(nextDayOnOrAfter('2026-11-10', 14), '2026-11-14');
+assert.equal(nextDayOnOrAfter('2026-11-14', 14), '2026-11-14');
+assert.equal(nextDayOnOrAfter('2027-02-10', 31), '2027-02-28');
+assert.equal(prevDayBefore('2026-12-14', 24), '2026-11-24');
+assert.equal(prevDayBefore('2026-01-14', 24), '2025-12-24');
+assert.equal(prevDayBefore('2026-11-20', 5), '2026-11-05');
+ok('fechas de corte y pago: siguiente/anterior, fin de año y meses cortos');
+
+const card = { id: 'nu', type: 'credito', currency: 'COP', openingBalance: -50000, cutDay: 24, payDay: 14 };
+const cmovs = [
+  { id: 'c1', kind: 'transferencia', date: '2026-11-05', accountId: 'nequi', toAccountId: 'nu', amount: 20000, toAmount: 20000 },
+  { id: 'c2', kind: 'gasto', date: '2026-11-10', accountId: 'nu', amount: 30000 },
+];
+// Antes del pago del 14: el corte (24 oct) ya pasó -> extracto fijo
+let cy = cardCycle(card, cmovs, [], '2026-11-10');
+assert.equal(cy.due, '2026-11-14');
+assert.equal(cy.cut, '2026-10-24');
+assert.equal(cy.cutPassed, true);
+assert.equal(cy.toPay, 30000); // deuda al corte 50.000 - 20.000 abonados; la compra del 10 va al siguiente
+assert.equal(cy.newCharges, 30000);
+assert.equal(cy.nextCut, '2026-11-24');
+// Después del pago del 14 y antes del corte del 24: estimado del siguiente
+cy = cardCycle(card, cmovs, [], '2026-11-22');
+assert.equal(cy.due, '2026-12-14');
+assert.equal(cy.cut, '2026-11-24');
+assert.equal(cy.cutPassed, false);
+assert.equal(cy.estimate, true);
+assert.equal(cy.toPay, 60000); // -50.000 + 20.000 - 30.000 = -60.000
+// El día del corte ya cuenta como extracto cerrado
+cy = cardCycle(card, cmovs, [], '2026-11-24');
+assert.equal(cy.cutPassed, true);
+assert.equal(cy.toPay, 60000);
+// Sin días configurados -> sin ciclo
+assert.equal(cardCycle({ ...card, cutDay: null }, cmovs, [], '2026-11-10'), null);
+// Pagó de más: no hay nada por pagar
+const cmovs2 = [...cmovs, { id: 'c3', kind: 'transferencia', date: '2026-11-12', accountId: 'nequi', toAccountId: 'nu', amount: 90000, toAmount: 90000 }];
+assert.equal(cardCycle(card, cmovs2, [], '2026-11-13').toPay, 0);
+ok('ciclo de tarjeta: extracto fijo tras el corte, estimado antes, pagos posteriores y sin configurar');
+
 console.log(`\nTodas las pruebas pasaron (${n}).`);
