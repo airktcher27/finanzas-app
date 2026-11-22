@@ -1,8 +1,10 @@
-// Service worker: la app abre sin internet. Estrategia "usar caché y actualizar por detrás".
-const CACHE = 'finanzas-v0.1.0';
+// Service worker: la app abre sin internet.
+// Con conexión siempre pide la versión más reciente; sin conexión usa la copia guardada.
+const CACHE = 'finanzas-v0.2.0';
 const ASSETS = [
   './', './index.html', './style.css', './app.js', './store.js', './crypto.js', './merge.js',
-  './github.js', './sync.js', './errors.js', './manifest.webmanifest', './icon-192.png', './icon-512.png',
+  './github.js', './sync.js', './errors.js', './money.js', './ledger.js', './defaults.js',
+  './manifest.webmanifest', './icon-192.png', './icon-512.png',
 ];
 
 self.addEventListener('install', (e) => {
@@ -23,17 +25,14 @@ self.addEventListener('fetch', (e) => {
   // Solo archivos de la propia app; las llamadas a api.github.com van directo a la red.
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
   e.respondWith(
-    caches.match(e.request).then((hit) => {
-      const net = fetch(e.request)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(e.request, copy));
-          }
-          return res;
-        })
-        .catch(() => hit);
-      return hit || net;
-    })
+    fetch(e.request, { cache: 'no-cache' })
+      .then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(e.request))
   );
 });
