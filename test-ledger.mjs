@@ -267,4 +267,47 @@ assert.equal(pts[0].date, '2026-06-30');
 assert.equal(pts[5].date, '2026-11-22');
 ok('puntos del patrimonio: primer dato, fines de mes, hoy y límite de 6 meses');
 
+
+// --- ahorro (cajita) ---
+import { savingsMonth, savingsYear, goalTargets, yearNeeded } from './ledger.js';
+const smovs = [
+  { id: 's1', kind: 'transferencia', date: '2026-11-02', accountId: 'nequi', toAccountId: 'caj', amount: 200000, toAmount: 200000 },
+  { id: 's2', kind: 'transferencia', date: '2026-11-20', accountId: 'nequi', toAccountId: 'caj', amount: 100000, toAmount: 100000 },
+  { id: 's3', kind: 'transferencia', date: '2026-11-25', accountId: 'caj', toAccountId: 'nequi', amount: 50000, toAmount: 50000 },
+  { id: 's4', kind: 'ingreso', date: '2026-11-30', accountId: 'caj', amount: 1500 },
+  { id: 's5', kind: 'gasto', date: '2026-10-05', accountId: 'caj', amount: 20000 },
+  { id: 's6', kind: 'transferencia', date: '2026-10-06', accountId: 'nequi', toAccountId: 'caj', amount: 400000, toAmount: 400000 },
+  { id: 's7', kind: 'transferencia', date: '2026-11-08', accountId: 'nequi', toAccountId: 'otra', amount: 999, toAmount: 999 },
+];
+assert.deepEqual(savingsMonth('caj', smovs, '2026-11'), { aportes: 250000, rendimientos: 1500 });
+assert.deepEqual(savingsMonth('caj', smovs, '2026-10'), { aportes: 380000, rendimientos: 0 });
+assert.deepEqual(savingsMonth('caj', smovs, '2026-09'), { aportes: 0, rendimientos: 0 });
+ok('aportes netos: entran transferencias, salen retiros y gastos; rendimientos aparte');
+// transferencia desde otra moneda: cuenta lo que recibe la cajita
+assert.equal(savingsMonth('caj', [{ kind: 'transferencia', date: '2026-11-03', accountId: 'hapi', toAccountId: 'caj', amount: 10000, toAmount: 400000 }], '2026-11').aportes, 400000);
+ok('aporte desde otra moneda cuenta el monto recibido');
+const sy = savingsYear('caj', smovs, 2026);
+assert.equal(sy.length, 12);
+assert.equal(sy[0].month, '2026-01');
+assert.equal(sy[10].aportes, 250000);
+assert.equal(sy.reduce((a, x) => a + x.aportes, 0), 630000);
+ok('año completo: 12 meses y total del año');
+assert.deepEqual(goalTargets({ monthly: 300000, annual: 0 }), { monthly: 300000, annual: 3600000 });
+assert.deepEqual(goalTargets({ monthly: 0, annual: 2400000 }), { monthly: 200000, annual: 2400000 });
+assert.deepEqual(goalTargets({ monthly: 300000, annual: 4000000 }), { monthly: 300000, annual: 4000000 });
+ok('metas efectivas: se deduce la que falta');
+// En noviembre con 300.000 ahorrados de 3.600.000: faltan 3.300.000 en noviembre y diciembre
+assert.deepEqual(yearNeeded(3600000, 300000, '2026-11-22', false), { left: 2, missing: 3300000, perMonth: 1650000 });
+// Si noviembre ya cumplió su meta, solo queda diciembre
+assert.deepEqual(yearNeeded(3600000, 300000, '2026-11-22', true), { left: 1, missing: 3300000, perMonth: 3300000 });
+// A inicio de año con el mes pendiente: 12 meses
+assert.deepEqual(yearNeeded(1200000, 0, '2026-01-05', false), { left: 12, missing: 1200000, perMonth: 100000 });
+// Redondea hacia arriba y no baja de cero
+assert.equal(yearNeeded(1000, 0, '2026-10-01', false).perMonth, 334); // 3 meses: 1000/3 = 333,3 → 334
+assert.equal(yearNeeded(1000, 0, '2026-09-01', false).perMonth, 250); // 4 meses
+assert.equal(yearNeeded(1000, 5000, '2026-06-01', false).perMonth, 0);
+// Diciembre ya cumplido: sin meses restantes, lo que falta queda tal cual
+assert.deepEqual(yearNeeded(1200000, 1000000, '2026-12-20', true), { left: 0, missing: 200000, perMonth: 200000 });
+ok('cuánto ahorrar al mes hasta diciembre para llegar a la meta anual');
+
 console.log(`\nTodas las pruebas pasaron (${n}).`);

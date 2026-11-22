@@ -261,3 +261,73 @@ export function lineChart(width, points, cur, name, color) {
   g.append(overlay);
   return g;
 }
+
+// ---------- Columnas de una serie con línea de meta (SVG) ----------
+// rows: [{ label, full, value, extra? }]  ·  target: meta mensual (minor)  ·  los valores pueden ser negativos (retiros)
+export function columnsTarget(width, rows, cur, target, name, color) {
+  const H = 210;
+  const padL = 64;
+  const padR = 8;
+  const padT = 22;
+  const padB = 26;
+  const W = Math.max(width, 260);
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const vals = rows.map((r) => r.value);
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(target, ...vals, 1), 4);
+  const lo = ticks[0];
+  const hi = ticks[ticks.length - 1];
+  const span = hi - lo || 1;
+  const y = (v) => padT + plotH - ((v - lo) / span) * plotH;
+  const y0 = y(0);
+
+  const g = s('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', height: H, role: 'img', 'aria-label': `${name} por mes, con la meta de ${formatMoney(target, cur)}` });
+  for (const t of ticks) {
+    g.append(s('line', { x1: padL, x2: W - padR, y1: y(t), y2: y(t), stroke: t === 0 ? 'var(--axis)' : 'var(--grid)', 'stroke-width': 1 }));
+    g.append(s('text', { x: padL - 6, y: y(t) + 4, 'text-anchor': 'end', class: 'ax', text: compactMoney(t, cur) }));
+  }
+  const groupW = plotW / rows.length;
+  const barW = Math.max(5, Math.min(18, groupW - 6));
+
+  rows.forEach((r, i) => {
+    const cx = padL + groupW * i + groupW / 2;
+    const hover = s('rect', { x: padL + groupW * i, y: padT, width: groupW, height: plotH, class: 'hover-wash', opacity: 0 });
+    g.append(hover);
+    if (r.value !== 0) {
+      const x = cx - barW / 2;
+      const yv = y(r.value);
+      const hh = Math.abs(yv - y0);
+      const rad = Math.min(4, barW / 2, hh);
+      // 4px redondeado en la punta, cuadrado en la base (arriba si es aporte, abajo si es retiro)
+      const d = r.value > 0
+        ? `M${x},${y0} V${yv + rad} Q${x},${yv} ${x + rad},${yv} H${x + barW - rad} Q${x + barW},${yv} ${x + barW},${yv + rad} V${y0} Z`
+        : `M${x},${y0} V${yv - rad} Q${x},${yv} ${x + rad},${yv} H${x + barW - rad} Q${x + barW},${yv} ${x + barW},${yv - rad} V${y0} Z`;
+      g.append(s('path', { d, fill: color }));
+    }
+    g.append(s('text', { x: cx, y: H - 8, 'text-anchor': 'middle', class: 'ax', text: r.label }));
+
+    const rowsTip = [
+      { color, label: name, value: formatMoney(r.value, cur) },
+      { label: 'Meta del mes', value: formatMoney(target, cur) },
+      ...(r.extra ? [{ label: 'Rendimientos', value: formatMoney(r.extra, cur) }] : []),
+    ];
+    const hit = s('rect', { x: padL + groupW * i, y: padT, width: groupW, height: plotH, fill: 'transparent', tabindex: 0, 'data-tip': '1',
+      'aria-label': `${r.full}: ${name} ${formatMoney(r.value, cur)} de ${formatMoney(target, cur)}` });
+    const show = (ev) => {
+      hover.setAttribute('opacity', 1);
+      const bb = ev.target.getBoundingClientRect();
+      showTip(ev.clientX || bb.left + bb.width / 2, ev.clientY || bb.top + 20, r.full, rowsTip);
+    };
+    const hide = () => { hover.setAttribute('opacity', 0); hideTip(); };
+    hit.addEventListener('pointermove', show);
+    hit.addEventListener('pointerleave', hide);
+    hit.addEventListener('focus', show);
+    hit.addEventListener('blur', hide);
+    g.append(hit);
+  });
+
+  // línea de meta: hairline sólida en tinta secundaria, con su etiqueta directa
+  g.append(s('line', { x1: padL, x2: W - padR, y1: y(target), y2: y(target), stroke: 'var(--muted)', 'stroke-width': 1.5, 'pointer-events': 'none' }));
+  g.append(s('text', { x: W - padR, y: y(target) - 5, 'text-anchor': 'end', class: 'end-label', 'pointer-events': 'none', text: `Meta ${compactMoney(target, cur)}` }));
+  return g;
+}

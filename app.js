@@ -7,11 +7,12 @@ import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
   debtFlows, debtRemaining, debtIsDone, debtTotals, addDays, cardCycle,
   categoryTotals, lastMonths, monthSeries, netWorthPoints, budgetState,
+  savingsMonth, savingsYear, goalTargets, yearNeeded,
 } from './ledger.js';
-import { rankedBars, groupedColumns, lineChart, tableView, hideTip } from './charts.js';
+import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTip } from './charts.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.4.0 (Fase 3)';
+const VERSION = '0.5.0 (Fase 3 + meta de ahorro)';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
 
@@ -194,6 +195,7 @@ async function loadData() {
   const abonos = live(all, 'abonos').filter((a) => debtIds.has(a.debtId));
   const flows = debtFlows(debts, abonos);
   const budgets = live(all, 'presupuestos');
+  const goals = live(all, 'metas');
   const cycles = new Map();
   for (const a of accounts) {
     if (a.type !== 'credito' || a.archived) continue;
@@ -208,6 +210,7 @@ async function loadData() {
     abonos,
     flows,
     budgets,
+    goals,
     cycles,
     debtTot: debtTotals(debts, abonos),
     balances: accountBalances(accounts, movs, flows),
@@ -310,6 +313,8 @@ function renderResumen(d) {
   }
   root.append(cards);
 
+  renderSavings(root, d);
+
   const limit = addDays(todayStr(), 7);
   const soon = [];
   for (const x of d.debts) {
@@ -332,6 +337,148 @@ function renderResumen(d) {
   }
   root.append(h('div', { class: 'row wrap', style: 'margin-top:14px' },
     h('button', { class: 'btn', type: 'button', onclick: () => openAccountForm(), text: '＋ Nueva cuenta' })));
+}
+
+// ---------- Meta de ahorro (cajita) ----------
+const sumBy = (arr, f) => arr.reduce((t, x) => t + f(x), 0);
+
+function savingsGoals(d) {
+  return d.goals.filter((g) => d.accById.has(g.accountId) && !d.accById.get(g.accountId).archived);
+}
+
+function renderSavings(root, d) {
+  const goals = savingsGoals(d);
+  root.append(h('div', { class: 'section-title', text: 'Meta de ahorro' }));
+  if (!goals.length) {
+    root.append(h('div', { class: 'chart-card' },
+      h('p', { class: 'hint', text: 'Define cuánto quieres ahorrar al mes y al año en tu cajita, y sigue cuánto aportas cada mes.' }),
+      h('button', { class: 'btn primary', type: 'button', text: 'Definir meta de ahorro', onclick: () => openGoalForm() })));
+    return;
+  }
+  const today = todayStr();
+  const month = monthOf(today);
+  const year = Number(today.slice(0, 4));
+  for (const g of goals) {
+    const acc = d.accById.get(g.accountId);
+    const cur = acc.currency;
+    const { monthly, annual } = goalTargets(g);
+    const m = savingsMonth(acc.id, d.movs, month);
+    const saved = sumBy(savingsYear(acc.id, d.movs, year), (x) => x.aportes);
+    const monthPct = monthly > 0 ? Math.max(0, m.aportes) / monthly : 0;
+    const yearPct = annual > 0 ? Math.max(0, saved) / annual : 0;
+    const monthDone = m.aportes >= monthly;
+    const yearDone = saved >= annual;
+    const need = yearNeeded(annual, saved, today, monthDone);
+    const behind = !yearDone && (need.left === 0 || need.perMonth > monthly);
+    const meter = (pct, label, state, aria) => h('div', { class: 'meter ' + state, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct * 100)), 'aria-label': aria },
+      h('div', { style: `width:${Math.min(pct, 1) * 100}%` }));
+    root.append(h('div', { class: 'chart-card sav' },
+      h('div', { class: 'row between' },
+        h('h3', { text: acc.name }),
+        h('strong', { text: formatMoney(d.balances.get(acc.id) || 0, cur) })),
+      h('div', { class: 'bud' },
+        h('div', { class: 'row' }, h('span', { text: 'Este mes' }), h('span', { text: `${formatMoney(m.aportes, cur)} / ${formatMoney(monthly, cur)}` })),
+        meter(monthPct, '', 'ok', `Meta del mes: ${Math.round(monthPct * 100)}%`),
+        h('div', { class: 'state', text: monthDone ? '✓ Meta del mes cumplida' : `Te faltan ${formatMoney(monthly - m.aportes, cur)}` })),
+      h('div', { class: 'bud' },
+        h('div', { class: 'row' }, h('span', { text: `Este año (${year})` }), h('span', { text: `${formatMoney(saved, cur)} / ${formatMoney(annual, cur)}` })),
+        meter(yearPct, '', behind ? 'warn' : 'ok', `Meta del año: ${Math.round(yearPct * 100)}%`),
+        h('div', { class: 'state', text: yearDone ? '✓ Meta del año cumplida'
+          : need.left === 0 ? `⚠ Faltaron ${formatMoney(need.missing, cur)} para la meta del año`
+          : behind ? `⚠ Para llegar necesitas ahorrar ${formatMoney(need.perMonth, cur)} al mes (tu meta mensual es ${formatMoney(monthly, cur)})`
+          : `✓ Vas bien: con ${formatMoney(need.perMonth, cur)} al mes llegas a la meta` })),
+      m.rendimientos > 0 && h('p', { class: 'hint', style: 'margin:6px 0 0', text: `Rendimientos este mes: ${formatMoney(m.rendimientos, cur)} (no cuentan como aporte)` }),
+      h('div', { class: 'row wrap', style: 'margin-top:10px' },
+        h('button', { class: 'btn primary', type: 'button', text: '＋ Aportar', onclick: () => openMovForm(null, { kind: 'transferencia', toAccountId: acc.id, amount: '' }) }),
+        h('button', { class: 'btn', type: 'button', text: 'Editar meta', onclick: () => openGoalForm(g) }))));
+  }
+  root.append(h('div', { class: 'row wrap', style: 'margin:-4px 0 12px' },
+    h('button', { class: 'btn', type: 'button', text: '＋ Otra meta de ahorro', onclick: () => openGoalForm() })));
+}
+
+function openGoalForm(existing) {
+  const d = ui.data;
+  if (!d) return;
+  const used = new Set(d.goals.map((g) => g.accountId));
+  const accs = d.accounts.filter((a) => a.type === 'ahorro' && !a.archived && (!used.has(a.id) || (existing && existing.accountId === a.id)));
+  if (!accs.length) {
+    const none = d.accounts.some((a) => a.type === 'ahorro' && !a.archived);
+    openSheet(h('div', { class: 'form' },
+      h('h3', { text: 'Meta de ahorro' }),
+      h('p', { class: 'hint', text: none
+        ? 'Todas tus cuentas de ahorro ya tienen una meta. Crea otra cuenta de ahorro si quieres una meta más.'
+        : 'Primero crea la cuenta de ahorro donde guardas ese dinero (por ejemplo, tu cajita de Nu). Después le defines la meta.' }),
+      h('div', { class: 'row end wrap' },
+        h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
+        h('button', { class: 'btn primary', type: 'button', text: 'Crear cuenta de ahorro', onclick: () => openAccountForm(null, { type: 'ahorro', name: 'Nubank cajita' }) }))));
+    return;
+  }
+  const curOf = (id) => (d.accById.get(id) ? d.accById.get(id).currency : 'COP');
+  const s = existing
+    ? {
+        accountId: existing.accountId,
+        monthly: existing.monthly ? toInput(existing.monthly, curOf(existing.accountId)) : '',
+        annual: existing.annual ? toInput(existing.annual, curOf(existing.accountId)) : '',
+      }
+    : { accountId: accs[0].id, monthly: '', annual: '' };
+  const body = h('div');
+  const err = h('p', { class: 'error', hidden: true });
+  const read = () => {
+    const f = body.querySelector('form');
+    if (!f) return;
+    for (const k of ['accountId', 'monthly', 'annual']) if (f.elements[k]) s[k] = f.elements[k].value;
+  };
+  const rebuild = () => { read(); build(); };
+
+  async function submit(ev) {
+    ev.preventDefault();
+    read();
+    const cur = curOf(s.accountId);
+    const monthly = s.monthly.trim() ? parseAmount(s.monthly, cur) : 0;
+    const annual = s.annual.trim() ? parseAmount(s.annual, cur) : 0;
+    if (s.monthly.trim() && !monthly) { err.textContent = 'Revisa la meta mensual.'; err.hidden = false; return; }
+    if (s.annual.trim() && !annual) { err.textContent = 'Revisa la meta anual.'; err.hidden = false; return; }
+    if (!(monthly > 0) && !(annual > 0)) { err.textContent = 'Pon al menos una meta: mensual o anual.'; err.hidden = false; return; }
+    closeSheet();
+    await saveRecord({
+      ...(existing || {}),
+      col: 'metas',
+      id: `meta-${s.accountId}`,
+      accountId: s.accountId,
+      monthly: monthly || 0,
+      annual: annual || 0,
+      deleted: false,
+      createdAt: existing ? existing.createdAt : Date.now(),
+    });
+  }
+
+  function build() {
+    err.hidden = true;
+    const cur = curOf(s.accountId);
+    body.replaceChildren(h('form', { class: 'form', onsubmit: submit },
+      h('h3', { text: existing ? 'Editar meta de ahorro' : 'Meta de ahorro' }),
+      h('label', {}, 'Cuenta de ahorro',
+        h('select', { name: 'accountId', disabled: !!existing, onchange: rebuild },
+          accs.map((a) => opt(a.id, `${a.name} (${a.currency})`, a.id === s.accountId)))),
+      h('label', {}, `Meta mensual (${cur})`,
+        h('input', { class: 'money', type: 'text', name: 'monthly', inputmode: 'decimal', placeholder: '0', autocomplete: 'off', value: s.monthly })),
+      h('label', {}, `Meta anual (${cur}, opcional)`,
+        h('input', { type: 'text', name: 'annual', inputmode: 'decimal', placeholder: 'Si la dejas vacía, será 12 veces la mensual', autocomplete: 'off', value: s.annual })),
+      h('p', { class: 'hint', text: 'Cuenta como aporte lo que transfieres a esta cuenta cada mes. Si retiras plata de ella, el aporte baja. Los rendimientos (intereses) no cuentan como aporte.' }),
+      err,
+      h('div', { class: 'row between wrap' },
+        existing ? h('button', { class: 'btn danger', type: 'button', text: 'Quitar meta', onclick: async () => {
+          if (!confirm('¿Quitar esta meta? La cuenta y sus movimientos no se tocan.')) return;
+          closeSheet();
+          await saveRecord({ ...existing, deleted: true });
+        } }) : h('span'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
+          h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' })))));
+  }
+
+  build();
+  openSheet(body);
 }
 
 function movRow(m, d) {
@@ -533,6 +680,27 @@ function renderReportes(d) {
       tableView(['Mes', 'Ingresos', 'Gastos'], ser.map((x) => [monthLabel(x.month), formatMoney(x.ingresos, cur), formatMoney(x.gastos, cur)])));
   }
   root.append(serCard);
+
+  // --- Ahorro por mes (una tarjeta por meta, en la moneda elegida) ---
+  const year = Number(month.slice(0, 4));
+  for (const g of savingsGoals(d)) {
+    const acc = d.accById.get(g.accountId);
+    if (acc.currency !== cur) continue;
+    const { monthly, annual } = goalTargets(g);
+    const yr = savingsYear(acc.id, d.movs, year);
+    const savedYear = sumBy(yr, (x) => x.aportes);
+    const card = h('div', { class: 'chart-card' },
+      h('h3', { text: `Ahorro por mes · ${acc.name}` }),
+      h('p', { class: 'hint', text: `${year}: llevas ${formatMoney(savedYear, cur)} de ${formatMoney(annual, cur)} · meta mensual ${formatMoney(monthly, cur)}` }));
+    if (yr.every((x) => x.aportes === 0 && x.rendimientos === 0)) {
+      card.append(h('p', { class: 'hint', text: `Todavía no hay aportes en ${year}. Usa "＋ Aportar" en el Resumen para registrar el primero.` }));
+    } else {
+      card.append(
+        columnsTarget(inner, yr.map((x) => ({ label: shortMonth(x.month).slice(0, 3), full: monthLabel(x.month), value: x.aportes, extra: x.rendimientos })), cur, monthly, 'Aportes', 'var(--s1)'),
+        tableView(['Mes', 'Aportes', 'Meta', 'Rendimientos'], yr.map((x) => [monthLabel(x.month), formatMoney(x.aportes, cur), formatMoney(monthly, cur), formatMoney(x.rendimientos, cur)])));
+    }
+    root.append(card);
+  }
 
   // --- Patrimonio neto ---
   const pts = netWorthPoints(d.accounts, d.movs, d.flows, d.debts, d.abonos, cur, todayStr(), 6);
@@ -1046,7 +1214,7 @@ async function openAbonoForm(debtId, existing) {
   }
 }
 
-function openAccountForm(existing) {
+function openAccountForm(existing, preset) {
   const d = ui.data;
   if (!d) return;
   const hasMovs = !!existing && d.movs.some((m) => m.accountId === existing.id || m.toAccountId === existing.id);
@@ -1061,7 +1229,7 @@ function openAccountForm(existing) {
         payDay: existing.payDay ? String(existing.payDay) : '',
         archived: !!existing.archived,
       }
-    : { name: '', type: 'debito', currency: 'COP', opening: '', limit: '', cutDay: '', payDay: '', archived: false };
+    : { name: '', type: 'debito', currency: 'COP', opening: '', limit: '', cutDay: '', payDay: '', archived: false, ...(preset || {}) };
 
   const body = h('div');
   const err = h('p', { class: 'error', hidden: true });

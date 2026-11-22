@@ -3,6 +3,7 @@ export const ACCOUNT_TYPES = {
   billetera: 'Billetera virtual',
   efectivo: 'Efectivo',
   credito: 'Tarjeta de crédito',
+  ahorro: 'Ahorro / cajita',
   inversion: 'Inversión',
 };
 

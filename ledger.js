@@ -332,3 +332,49 @@ export function netWorthPoints(accounts, movs, flows, debts, abonos, currency, t
   }
   return pts;
 }
+
+// ---------- Ahorro (cajita) ----------
+// Aportes netos de un mes a una cuenta de ahorro:
+//   + transferencias que entran (lo que recibe la cuenta)
+//   − transferencias que salen y gastos pagados desde la cuenta (retiros)
+// Los ingresos registrados en la cuenta son rendimientos (intereses) y se cuentan aparte:
+// no son plata que tú aportaste.
+export function savingsMonth(accId, movs, month) {
+  let aportes = 0;
+  let rendimientos = 0;
+  for (const m of movs) {
+    if (!m.date.startsWith(month)) continue;
+    if (m.kind === 'transferencia') {
+      if (m.toAccountId === accId) aportes += m.toAmount ?? m.amount;
+      if (m.accountId === accId) aportes -= m.amount;
+    } else if (m.kind === 'gasto' && m.accountId === accId) aportes -= m.amount;
+    else if (m.kind === 'ingreso' && m.accountId === accId) rendimientos += m.amount;
+  }
+  return { aportes, rendimientos };
+}
+
+// Los 12 meses de un año con aportes y rendimientos de cada uno.
+export function savingsYear(accId, movs, year) {
+  const out = [];
+  for (let i = 1; i <= 12; i++) {
+    const month = `${year}-${pad(i)}`;
+    out.push({ month, ...savingsMonth(accId, movs, month) });
+  }
+  return out;
+}
+
+// Metas efectivas: si solo pones una, la otra se deduce (anual = 12 × mensual; mensual = anual / 12).
+export function goalTargets(goal) {
+  const monthly = goal.monthly > 0 ? goal.monthly : Math.round((goal.annual || 0) / 12);
+  const annual = goal.annual > 0 ? goal.annual : monthly * 12;
+  return { monthly, annual };
+}
+
+// Cuánto hay que ahorrar por mes, de aquí a diciembre, para llegar a la meta anual.
+// Si el mes en curso ya cumplió su meta, no se cuenta como mes restante.
+export function yearNeeded(annual, saved, today, currentMonthDone) {
+  const m = Number(today.slice(5, 7));
+  const left = 12 - m + (currentMonthDone ? 0 : 1);
+  const missing = Math.max(0, annual - saved);
+  return { left, missing, perMonth: left > 0 ? Math.ceil(missing / left) : missing };
+}

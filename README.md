@@ -119,6 +119,22 @@ Pestaña **Reportes**. Arriba, una sola fila de filtros (mes y moneda) que contr
 
 Pasa el dedo o el cursor por un gráfico para ver el detalle, y cada gráfico tiene "Ver como tabla" con los mismos datos. Las transferencias, los pagos de tarjeta y los préstamos no cuentan como ingreso ni gasto. Los presupuestos se sincronizan como el resto de tus datos.
 
+## Meta de ahorro (cajita)
+
+Para seguir cuánto ahorras cada mes en tu cajita de Nu:
+
+1. Crea una cuenta de tipo **Ahorro / cajita** (por ejemplo "Nubank cajita"). En **Resumen**, el botón *Definir meta de ahorro* te lleva a crearla si aún no existe.
+2. Define la **meta mensual** y, si quieres, la **anual** (si la dejas vacía, será 12 veces la mensual; si solo pones la anual, la mensual es la anual entre 12).
+3. Cuando metas plata a la cajita, usa **＋ Aportar** en la tarjeta de ahorro (abre una transferencia hacia la cajita) o registra una transferencia normal.
+
+Cómo se cuenta:
+- **Aporte del mes** = lo que entra a la cajita por transferencia, menos lo que sacas de ella (retiros y gastos pagados desde ella).
+- Los **rendimientos** (intereses) los registras como *ingreso* en la cajita; se muestran aparte y no cuentan como aporte tuyo, pero sí suben el saldo.
+- La tarjeta del Resumen muestra el avance del mes y del año. Para la meta anual te dice cuánto necesitas ahorrar **al mes, de aquí a diciembre**, para llegar (⚠ si es más que tu meta mensual, ✓ si vas bien).
+- En **Reportes** hay un gráfico con los aportes de cada mes del año y la línea de la meta.
+
+Si empiezas a ahorrar a mitad de año, pon una meta anual acorde a los meses que quedan; si no, la app te avisará con ⚠ que no alcanzas con tu meta mensual.
+
 ## Pruebas
 
 - `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos y respaldo).
