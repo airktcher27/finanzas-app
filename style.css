@@ -46,7 +46,7 @@ h3 { margin: 0 0 4px; }
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 6px 0 16px; overflow-x: auto; }
 .tabs button {
   background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
-  padding: 10px 14px; font: inherit; cursor: pointer; white-space: nowrap;
+  padding: 10px 11px; font: inherit; cursor: pointer; white-space: nowrap;
 }
 .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 .hint { color: var(--muted); font-size: .9rem; margin: 4px 0 12px; }
@@ -93,6 +93,14 @@ input:focus-visible, button:focus-visible, select:focus-visible { outline: 2px s
 .amt.pos { color: var(--ok); }
 .amt.neg { color: var(--danger); }
 .item.archived { opacity: .6; }
+.item .amt small.late { color: var(--danger); font-weight: 600; }
+.item.done { opacity: .65; }
+.kv { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+.kv span:first-child { color: var(--muted); }
+.kv strong { text-align: right; }
+details { margin-top: 18px; }
+summary { cursor: pointer; color: var(--muted); font-size: .9rem; padding: 6px 0; }
+details .list { margin-top: 8px; }
 .day { font-size: .85rem; color: var(--muted); margin: 16px 0 6px; }
 .empty { text-align: center; padding: 28px 8px; display: grid; gap: 10px; justify-items: center; }
 .empty p { margin: 0; color: var(--muted); }

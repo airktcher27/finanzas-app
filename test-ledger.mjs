@@ -85,4 +85,50 @@ assert.equal(shiftMonth('2026-12', 1), '2027-01');
 assert.equal(todayStr(new Date(2026, 10, 5)), '2026-11-05');
 ok('navegación de meses y fecha local');
 
+// --- deudas ---
+import { debtFlows, debtRemaining, debtIsDone, debtTotals, addDays } from './ledger.js';
+const debts = [
+  { id: 'd1', dir: 'me-deben', person: 'Juan', currency: 'COP', amount: 100000, date: '2026-11-10', accountId: 'nequi', createdAt: 10 },
+  { id: 'd2', dir: 'debo', person: 'Banco', currency: 'COP', amount: 500000, date: '2026-11-11', accountId: 'nequi', createdAt: 11 },
+  { id: 'd3', dir: 'me-deben', person: 'Ana', currency: 'USD', amount: 5000, date: '2026-11-12', accountId: '', createdAt: 12 },
+  { id: 'd4', dir: 'me-deben', person: 'Pedro', currency: 'COP', amount: 80000, date: '2026-11-01', accountId: '', closed: true, createdAt: 13 },
+  { id: 'd5', dir: 'me-deben', person: 'Luis', currency: 'COP', amount: 20000, date: '2026-11-02', accountId: '', createdAt: 14 },
+];
+const abonos = [
+  { id: 'a1', debtId: 'd1', amount: 30000, date: '2026-11-15', accountId: 'nequi', createdAt: 20 },
+  { id: 'a2', debtId: 'd2', amount: 100000, date: '2026-11-16', accountId: 'nequi', createdAt: 21 },
+  { id: 'a3', debtId: 'd5', amount: 20000, date: '2026-11-17', accountId: '', createdAt: 22 },
+  { id: 'a4', debtId: 'no-existe', amount: 999, date: '2026-11-17', accountId: 'nequi', createdAt: 23 },
+];
+assert.equal(debtRemaining(debts[0], abonos), 70000);
+assert.equal(debtRemaining(debts[4], abonos), 0);
+assert.equal(debtIsDone(debts[3], abonos), true); // cerrada a mano
+assert.equal(debtIsDone(debts[4], abonos), true); // pagada del todo
+assert.equal(debtIsDone(debts[0], abonos), false);
+ok('deuda pendiente, saldada por abonos o cerrada a mano');
+
+const flows = debtFlows(debts, abonos);
+assert.equal(flows.length, 4); // d1, d2, a1, a2 (a3 sin cuenta, a4 huérfano, d3/d4/d5 sin cuenta)
+const bal2 = accountBalances(accounts, movs, flows);
+assert.equal(bal2.get('nequi'), bal.get('nequi') - 100000 + 500000 + 30000 - 100000);
+assert.equal(bal2.get('cred'), bal.get('cred'));
+ok('préstamo hecho/recibido y abonos mueven el saldo de la cuenta; huérfanos y sin cuenta no');
+
+const dt = debtTotals(debts, abonos);
+assert.deepEqual(dt, { COP: { toMe: 70000, iOwe: 400000 }, USD: { toMe: 5000, iOwe: 0 } });
+ok('totales pendientes por moneda excluyen saldadas y cerradas');
+
+const ns2 = netSummary(accounts, bal2, dt);
+assert.equal(ns2.COP.toMe, 70000);
+assert.equal(ns2.COP.iOwe, 400000);
+assert.equal(ns2.COP.net, bal2.get('nequi') - 40000 + 70000 - 400000);
+assert.equal(ns2.USD.toMe, 5000);
+assert.equal(ns2.USD.net, 20000 + 5000);
+assert.equal(netSummary(accounts, bal).COP.toMe, 0);
+ok('neto incluye lo que te deben y lo que debes');
+
+assert.equal(addDays('2026-11-28', 5), '2026-12-03');
+assert.equal(addDays('2026-12-30', 3), '2027-01-02');
+ok('suma de días');
+
 console.log(`\nTodas las pruebas pasaron (${n}).`);

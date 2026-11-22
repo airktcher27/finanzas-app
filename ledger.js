@@ -18,11 +18,13 @@ export function shiftMonth(month, delta) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
 }
 
-export function accountBalances(accounts, movs) {
+// `flows` son los movimientos de dinero que generan las deudas y sus abonos (ver debtFlows).
+export function accountBalances(accounts, movs, flows = []) {
   const bal = new Map(accounts.map((a) => [a.id, a.openingBalance || 0]));
   const add = (id, v) => {
     if (bal.has(id)) bal.set(id, bal.get(id) + v);
   };
+  for (const f of flows) add(f.accountId, f.effect);
   for (const m of movs) {
     if (m.kind === 'ingreso') add(m.accountId, m.amount);
     else if (m.kind === 'gasto') add(m.accountId, -m.amount);
@@ -60,16 +62,81 @@ export function monthTotals(movs, accById, month, accountId) {
   return out;
 }
 
-// Por moneda: disponible (cuentas normales), tarjetas (saldo de crédito, negativo = deuda) y neto.
-export function netSummary(accounts, balances) {
+// Por moneda: disponible (cuentas normales), tarjetas (saldo de crédito, negativo = deuda),
+// lo que te deben (toMe), lo que debes en préstamos (iOwe) y el neto de todo.
+export function netSummary(accounts, balances, debtTot = {}) {
   const out = {};
+  const slot = (cur) => (out[cur] ||= { assets: 0, cards: 0, toMe: 0, iOwe: 0, net: 0 });
   for (const a of accounts) {
     if (a.archived) continue;
-    const t = (out[a.currency] ||= { assets: 0, cards: 0, net: 0 });
+    const t = slot(a.currency);
     const b = balances.get(a.id) || 0;
     if (a.type === 'credito') t.cards += b;
     else t.assets += b;
     t.net += b;
   }
+  for (const [cur, d] of Object.entries(debtTot)) {
+    const t = slot(cur);
+    t.toMe = d.toMe;
+    t.iOwe = d.iOwe;
+    t.net += d.toMe - d.iOwe;
+  }
   return out;
+}
+
+// ---------- Deudas ----------
+// deuda: { dir: 'me-deben' | 'debo', person, currency, amount, date, dueDate, accountId, closed }
+// abono: { debtId, amount, date, accountId }
+// Si la deuda o el abono tienen cuenta, mueven el saldo de esa cuenta:
+//   te prestaste/prestaste: sale dinero (−) · te prestaron: entra (+)
+//   te pagan un abono: entra (+) · tú pagas un abono: sale (−)
+export function debtFlows(debts, abonos) {
+  const byId = new Map(debts.map((d) => [d.id, d]));
+  const out = [];
+  for (const d of debts) {
+    if (!d.accountId) continue;
+    out.push({
+      id: 'd:' + d.id, kind: 'deuda', debtId: d.id, date: d.date, accountId: d.accountId,
+      effect: d.dir === 'debo' ? d.amount : -d.amount,
+      label: d.dir === 'debo' ? `Préstamo de ${d.person}` : `Préstamo a ${d.person}`,
+      createdAt: d.createdAt || 0,
+    });
+  }
+  for (const a of abonos) {
+    const d = byId.get(a.debtId);
+    if (!d || !a.accountId) continue;
+    out.push({
+      id: 'a:' + a.id, kind: 'abono', debtId: d.id, date: a.date, accountId: a.accountId,
+      effect: d.dir === 'debo' ? -a.amount : a.amount,
+      label: d.dir === 'debo' ? `Pago a ${d.person}` : `Abono de ${d.person}`,
+      createdAt: a.createdAt || 0,
+    });
+  }
+  return out;
+}
+
+export function debtRemaining(debt, abonos) {
+  let paid = 0;
+  for (const a of abonos) if (a.debtId === debt.id) paid += a.amount;
+  return debt.amount - paid;
+}
+
+export const debtIsDone = (debt, abonos) => !!debt.closed || debtRemaining(debt, abonos) <= 0;
+
+// Pendiente por moneda: lo que te deben y lo que debes.
+export function debtTotals(debts, abonos) {
+  const out = {};
+  for (const d of debts) {
+    if (debtIsDone(d, abonos)) continue;
+    const t = (out[d.currency] ||= { toMe: 0, iOwe: 0 });
+    const rem = debtRemaining(d, abonos);
+    if (d.dir === 'debo') t.iOwe += rem;
+    else t.toMe += rem;
+  }
+  return out;
+}
+
+export function addDays(dateStr, n) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return todayStr(new Date(y, m - 1, d + n));
 }

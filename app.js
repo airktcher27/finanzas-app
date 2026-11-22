@@ -3,10 +3,13 @@ import { createGithub } from './github.js';
 import { runSync, exportEncrypted, importEncrypted } from './sync.js';
 import { SyncError } from './errors.js';
 import { parseAmount, formatMoney, toInput, CURRENCIES } from './money.js';
-import { live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth } from './ledger.js';
+import {
+  live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
+  debtFlows, debtRemaining, debtIsDone, debtTotals, addDays,
+} from './ledger.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.2.0 (Fase 1)';
+const VERSION = '0.3.0 (Fase 2)';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
 
@@ -184,11 +187,19 @@ async function loadData() {
   const accounts = live(all, 'cuentas').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const cats = live(all, 'categorias').sort((a, b) => (a.order ?? 999) - (b.order ?? 999) || a.name.localeCompare(b.name, 'es'));
   const movs = live(all, 'movs');
+  const debts = live(all, 'deudas').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const debtIds = new Set(debts.map((x) => x.id));
+  const abonos = live(all, 'abonos').filter((a) => debtIds.has(a.debtId));
+  const flows = debtFlows(debts, abonos);
   return {
     accounts,
     cats,
     movs,
-    balances: accountBalances(accounts, movs),
+    debts,
+    abonos,
+    flows,
+    debtTot: debtTotals(debts, abonos),
+    balances: accountBalances(accounts, movs, flows),
     accById: new Map(accounts.map((a) => [a.id, a])),
     catById: new Map(cats.map((c) => [c.id, c])),
   };
@@ -208,10 +219,12 @@ const dayLabel = (ds) => {
 async function render() {
   ui.data = await loadData();
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === ui.tab));
-  for (const t of ['resumen', 'movs', 'ajustes']) $(`#tab-${t}`).hidden = ui.tab !== t;
+  for (const t of ['resumen', 'movs', 'deudas', 'ajustes']) $(`#tab-${t}`).hidden = ui.tab !== t;
   $('#fab').hidden = ui.tab === 'ajustes';
+  $('#fab').setAttribute('aria-label', ui.tab === 'deudas' ? 'Añadir deuda' : 'Añadir movimiento');
   if (ui.tab === 'resumen') renderResumen(ui.data);
   else if (ui.tab === 'movs') renderMovs(ui.data);
+  else if (ui.tab === 'deudas') renderDeudas(ui.data);
   else renderCategories(ui.data);
 }
 
@@ -249,7 +262,7 @@ function renderResumen(d) {
       h('button', { class: 'btn', type: 'button', onclick: () => openAccountForm(), text: 'Crear una cuenta propia' })));
     return;
   }
-  const net = netSummary(d.accounts, d.balances);
+  const net = netSummary(d.accounts, d.balances, d.debtTot);
   const totals = monthTotals(d.movs, d.accById, monthOf(todayStr()));
   const cards = h('div', { class: 'cards' });
   for (const cur of Object.keys(net)) {
@@ -260,10 +273,19 @@ function renderResumen(d) {
       h('div', { class: 'big', text: formatMoney(n.net, cur) }),
       h('div', { class: 'line' }, h('span', { text: 'Disponible' }), h('span', { text: formatMoney(n.assets, cur) })),
       n.cards !== 0 && h('div', { class: 'line' }, h('span', { text: 'Tarjetas' }), h('span', { text: formatMoney(n.cards, cur) })),
+      n.toMe !== 0 && h('div', { class: 'line' }, h('span', { text: 'Te deben' }), h('span', { text: formatMoney(n.toMe, cur) })),
+      n.iOwe !== 0 && h('div', { class: 'line' }, h('span', { text: 'Debes (préstamos)' }), h('span', { text: formatMoney(-n.iOwe, cur) })),
       h('div', { class: 'line' }, h('span', { text: 'Ingresos este mes' }), h('span', { text: formatMoney(t.ingresos, cur) })),
       h('div', { class: 'line' }, h('span', { text: 'Gastos este mes' }), h('span', { text: formatMoney(t.gastos, cur) }))));
   }
   root.append(cards);
+
+  const soon = d.debts
+    .filter((x) => !debtIsDone(x, d.abonos) && x.dueDate && x.dueDate <= addDays(todayStr(), 7))
+    .sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1));
+  if (soon.length) {
+    root.append(h('div', { class: 'section-title', text: 'Vencimientos' }), h('div', { class: 'list' }, soon.map((x) => debtRow(x, d))));
+  }
 
   const active = d.accounts.filter((a) => !a.archived);
   const archived = d.accounts.filter((a) => a.archived);
@@ -276,6 +298,15 @@ function renderResumen(d) {
 }
 
 function movRow(m, d) {
+  if (m.kind === 'deuda' || m.kind === 'abono') {
+    const acc = d.accById.get(m.accountId);
+    const cls = m.effect >= 0 ? 'pos' : 'neg';
+    return h('button', { type: 'button', class: 'item', onclick: () => openDebtDetail(m.debtId) },
+      h('div', { class: 'main' },
+        h('div', { class: 'title', text: m.label }),
+        h('div', { class: 'sub', text: [m.kind === 'deuda' ? 'Préstamo' : 'Abono', acc ? acc.name : null].filter(Boolean).join(' · ') })),
+      h('div', { class: 'amt ' + cls, text: (m.effect >= 0 ? '+' : '−') + formatMoney(Math.abs(m.effect), acc ? acc.currency : 'COP') }));
+  }
   const from = d.accById.get(m.accountId);
   const to = d.accById.get(m.toAccountId);
   const cat = d.catById.get(m.categoryId);
@@ -323,7 +354,7 @@ function renderMovs(d) {
   const parts = Object.entries(totals).map(([cur, t]) => `${cur}: ingresos ${formatMoney(t.ingresos, cur)} · gastos ${formatMoney(t.gastos, cur)}`);
   root.append(h('p', { class: 'totals', text: parts.join('   |   ') || 'Sin ingresos ni gastos este mes.' }));
 
-  const list = filterMovs(d.movs, { month: ui.month, accountId: ui.filterAccount });
+  const list = filterMovs([...d.movs, ...d.flows], { month: ui.month, accountId: ui.filterAccount });
   if (!list.length) {
     root.append(h('div', { class: 'empty' },
       h('p', { text: 'No hay movimientos en este mes.' }),
@@ -340,6 +371,56 @@ function renderMovs(d) {
       lastDate = m.date;
     }
     ul.append(movRow(m, d));
+  }
+}
+
+const shortDate = (ds) => {
+  const [y, mo, d] = ds.split('-').map(Number);
+  return new Date(y, mo - 1, d).toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+};
+
+function debtRow(x, d) {
+  const rem = debtRemaining(x, d.abonos);
+  const done = debtIsDone(x, d.abonos);
+  const overdue = !done && x.dueDate && x.dueDate < todayStr();
+  const sub = [`de ${formatMoney(x.amount, x.currency)}`, shortDate(x.date), x.note].filter(Boolean).join(' · ');
+  let amt;
+  let cls = '';
+  if (done) amt = 'Saldada';
+  else {
+    amt = formatMoney(rem, x.currency);
+    cls = x.dir === 'debo' ? 'neg' : 'pos';
+  }
+  return h('button', { type: 'button', class: 'item' + (done ? ' done' : ''), onclick: () => openDebtDetail(x.id) },
+    h('div', { class: 'main' },
+      h('div', { class: 'title', text: x.person }),
+      h('div', { class: 'sub', text: (x.dir === 'debo' ? 'Le debes · ' : 'Te debe · ') + sub })),
+    h('div', { class: 'amt ' + cls }, amt,
+      !done && x.dueDate && h('small', { class: overdue ? 'late' : '', text: (overdue ? 'Vencida ' : 'Vence ') + shortDate(x.dueDate) })));
+}
+
+function renderDeudas(d) {
+  const root = $('#deudas-body');
+  root.replaceChildren();
+  if (!d.debts.length) {
+    root.append(h('div', { class: 'empty' },
+      h('p', { text: 'Aquí llevas lo que te deben y lo que debes a personas o entidades (las tarjetas de crédito ya están en Cuentas).' }),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => openDebtForm(), text: '＋ Añadir deuda' })));
+    return;
+  }
+  const parts = Object.entries(d.debtTot).map(([cur, t]) => `${cur}: te deben ${formatMoney(t.toMe, cur)} · debes ${formatMoney(t.iOwe, cur)}`);
+  root.append(h('p', { class: 'totals', text: parts.join('   |   ') || 'No tienes deudas pendientes.' }));
+
+  const open = d.debts.filter((x) => !debtIsDone(x, d.abonos));
+  const done = d.debts.filter((x) => debtIsDone(x, d.abonos));
+  const byDue = (a, b) => (a.dueDate || '9999') < (b.dueDate || '9999') ? -1 : (a.dueDate || '9999') > (b.dueDate || '9999') ? 1 : (b.createdAt || 0) - (a.createdAt || 0);
+  for (const [dir, label] of [['me-deben', 'Me deben'], ['debo', 'Debo']]) {
+    const list = open.filter((x) => x.dir === dir).sort(byDue);
+    root.append(h('div', { class: 'section-title', text: label }),
+      list.length ? h('div', { class: 'list' }, list.map((x) => debtRow(x, d))) : h('p', { class: 'hint', text: 'Nada pendiente.' }));
+  }
+  if (done.length) {
+    root.append(h('details', {}, h('summary', { text: `Saldadas (${done.length})` }), h('div', { class: 'list' }, done.map((x) => debtRow(x, d)))));
   }
 }
 
@@ -511,6 +592,217 @@ async function openMovForm(existing) {
   if (!existing) {
     const inp = body.querySelector('[name=amount]');
     if (inp) inp.focus();
+  }
+}
+
+// ---------- Deudas: formularios ----------
+function openDebtForm(existing) {
+  const d = ui.data;
+  if (!d) return;
+  const hasAbonos = !!existing && d.abonos.some((a) => a.debtId === existing.id);
+  const s = existing
+    ? {
+        dir: existing.dir, person: existing.person, currency: existing.currency,
+        amount: toInput(existing.amount, existing.currency), date: existing.date,
+        dueDate: existing.dueDate || '', accountId: existing.accountId || '', note: existing.note || '',
+      }
+    : { dir: 'me-deben', person: '', currency: 'COP', amount: '', date: todayStr(), dueDate: '', accountId: '', note: '' };
+
+  const body = h('div');
+  const err = h('p', { class: 'error', hidden: true });
+  const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+  const read = () => {
+    const f = body.querySelector('form');
+    if (!f) return;
+    for (const k of ['person', 'currency', 'amount', 'date', 'dueDate', 'accountId', 'note']) if (f.elements[k]) s[k] = f.elements[k].value;
+  };
+  const rebuild = () => { read(); build(); };
+
+  async function submit(ev) {
+    ev.preventDefault();
+    read();
+    const person = s.person.trim();
+    if (!person) return fail('Escribe con quién es la deuda.');
+    const amount = parseAmount(s.amount, s.currency);
+    if (!amount || amount <= 0) return fail('Ingresa un monto mayor que cero.');
+    if (!s.date) return fail('Elige la fecha.');
+    if (s.dueDate && s.dueDate < s.date) return fail('El vencimiento no puede ser anterior a la fecha de la deuda.');
+    if (existing) {
+      const paid = existing.amount - debtRemaining(existing, d.abonos);
+      if (amount < paid) return fail(`El monto no puede ser menor a lo ya abonado (${formatMoney(paid, s.currency)}).`);
+    }
+    closeSheet();
+    await saveRecord({
+      ...(existing || {}),
+      col: 'deudas',
+      id: existing ? existing.id : crypto.randomUUID(),
+      dir: s.dir,
+      person,
+      currency: s.currency,
+      amount,
+      date: s.date,
+      dueDate: s.dueDate || '',
+      accountId: s.accountId || '',
+      note: s.note.trim(),
+      closed: existing ? !!existing.closed : false,
+      deleted: false,
+      createdAt: existing ? existing.createdAt : Date.now(),
+    });
+    if (existing) openDebtDetail(existing.id);
+  }
+
+  function build() {
+    err.hidden = true;
+    const persons = [...new Set(d.debts.map((x) => x.person))].sort((a, b) => a.localeCompare(b, 'es'));
+    const accs = d.accounts.filter((a) => a.currency === s.currency && (!a.archived || a.id === s.accountId));
+    if (s.accountId && !accs.some((a) => a.id === s.accountId)) s.accountId = '';
+    const owe = s.dir === 'debo';
+    const fields = [
+      h('div', { class: 'seg', style: 'grid-template-columns:1fr 1fr' }, [['me-deben', 'Me deben'], ['debo', 'Debo']].map(([k, label]) =>
+        h('button', { type: 'button', class: s.dir === k ? 'on' : '', text: label, disabled: hasAbonos && s.dir !== k, onclick: () => { read(); s.dir = k; build(); } }))),
+      h('label', {}, owe ? 'A quién le debes' : 'Quién te debe',
+        h('input', { type: 'text', name: 'person', list: 'persons', autocomplete: 'off', value: s.person, required: true }),
+        h('datalist', { id: 'persons' }, persons.map((p) => h('option', { value: p })))),
+      h('label', {}, hasAbonos ? 'Moneda (no se puede cambiar: ya tiene abonos)' : 'Moneda',
+        h('select', { name: 'currency', disabled: hasAbonos, onchange: rebuild },
+          Object.entries(CURRENCIES).map(([k, c]) => opt(k, c.label, k === s.currency)))),
+      h('label', {}, `Monto total (${s.currency})`,
+        h('input', { class: 'money', type: 'text', name: 'amount', inputmode: 'decimal', placeholder: '0', autocomplete: 'off', value: s.amount })),
+      h('label', {}, 'Fecha', h('input', { type: 'date', name: 'date', value: s.date, required: true })),
+      h('label', {}, 'Vence (opcional)', h('input', { type: 'date', name: 'dueDate', value: s.dueDate })),
+      h('label', {}, owe ? 'Cuenta donde entró el dinero (opcional)' : 'Cuenta de donde salió el dinero (opcional)',
+        h('select', { name: 'accountId' },
+          opt('', 'No afecta ninguna cuenta', !s.accountId),
+          accs.map((a) => opt(a.id, a.name, a.id === s.accountId)))),
+      h('label', {}, 'Nota (opcional)', h('input', { type: 'text', name: 'note', autocomplete: 'off', value: s.note })),
+    ];
+    const buttons = h('div', { class: 'row end wrap' },
+      h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: () => (existing ? openDebtDetail(existing.id) : closeSheet()) }),
+      h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }));
+    body.replaceChildren(h('form', { class: 'form', onsubmit: submit },
+      h('h3', { text: existing ? 'Editar deuda' : 'Nueva deuda' }), fields, err, buttons));
+  }
+
+  build();
+  openSheet(body);
+}
+
+function openDebtDetail(id) {
+  const d = ui.data;
+  const x = d && d.debts.find((y) => y.id === id);
+  if (!x) { closeSheet(); return; }
+  const rem = debtRemaining(x, d.abonos);
+  const done = debtIsDone(x, d.abonos);
+  const paid = x.amount - rem;
+  const mine = d.abonos.filter((a) => a.debtId === x.id).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || 0) - (a.createdAt || 0)));
+  const acc = x.accountId ? d.accById.get(x.accountId) : null;
+  const kv = (k, v) => h('div', { class: 'kv' }, h('span', { text: k }), h('strong', { text: v }));
+
+  const status = x.closed && rem > 0 ? 'Saldada (cerrada a mano)' : done ? 'Saldada' : 'Pendiente';
+  const content = h('div', { class: 'form' },
+    h('h3', { text: `${x.dir === 'debo' ? 'Le debes a' : 'Te debe'} ${x.person}` }),
+    h('div', {},
+      kv('Estado', status),
+      kv('Monto total', formatMoney(x.amount, x.currency)),
+      kv(x.dir === 'debo' ? 'Has pagado' : 'Te han pagado', formatMoney(paid, x.currency)),
+      kv('Falta', formatMoney(Math.max(rem, 0), x.currency)),
+      kv('Fecha', shortDate(x.date)),
+      x.dueDate && kv('Vence', shortDate(x.dueDate)),
+      acc && kv(x.dir === 'debo' ? 'Entró a' : 'Salió de', acc.name),
+      x.note && kv('Nota', x.note)),
+    mine.length > 0 && h('div', {},
+      h('div', { class: 'section-title', text: 'Abonos' }),
+      h('div', { class: 'list' }, mine.map((a) => {
+        const aa = a.accountId ? d.accById.get(a.accountId) : null;
+        return h('button', { type: 'button', class: 'item', onclick: () => openAbonoForm(x.id, a) },
+          h('div', { class: 'main' },
+            h('div', { class: 'title', text: shortDate(a.date) }),
+            h('div', { class: 'sub', text: [a.note, aa ? aa.name : null].filter(Boolean).join(' · ') || 'Sin cuenta asociada' })),
+          h('div', { class: 'amt', text: formatMoney(a.amount, x.currency) }));
+      }))),
+    h('div', { class: 'row wrap' },
+      !done && h('button', { class: 'btn primary', type: 'button', text: x.dir === 'debo' ? 'Registrar pago' : 'Registrar abono', onclick: () => openAbonoForm(x.id) }),
+      h('button', { class: 'btn', type: 'button', text: 'Editar', onclick: () => openDebtForm(x) }),
+      done && x.closed
+        ? h('button', { class: 'btn', type: 'button', text: 'Reabrir', onclick: async () => { await saveRecord({ ...x, closed: false }); openDebtDetail(x.id); } })
+        : !done && h('button', { class: 'btn', type: 'button', text: 'Marcar saldada', onclick: async () => {
+            if (!confirm('¿Marcar como saldada? Lo que falta deja de contar como pendiente.')) return;
+            await saveRecord({ ...x, closed: true });
+            openDebtDetail(x.id);
+          } })),
+    h('div', { class: 'row between wrap' },
+      h('button', { class: 'btn danger', type: 'button', text: 'Eliminar', onclick: async () => {
+        if (!confirm('¿Eliminar esta deuda? También se borran sus abonos y su efecto en los saldos de tus cuentas.')) return;
+        closeSheet();
+        await saveRecord({ ...x, deleted: true });
+      } }),
+      h('button', { class: 'btn', type: 'button', text: 'Cerrar', onclick: closeSheet })));
+  openSheet(content);
+}
+
+async function openAbonoForm(debtId, existing) {
+  const d = ui.data;
+  const x = d && d.debts.find((y) => y.id === debtId);
+  if (!x) return;
+  const rem = debtRemaining(x, d.abonos) + (existing ? existing.amount : 0);
+  const accs = d.accounts.filter((a) => a.currency === x.currency && (!a.archived || (existing && a.id === existing.accountId)));
+  const last = await store.getMeta('lastAccount');
+  const s = existing
+    ? { amount: toInput(existing.amount, x.currency), date: existing.date, accountId: existing.accountId || '', note: existing.note || '' }
+    : { amount: toInput(rem, x.currency), date: todayStr(), accountId: accs.some((a) => a.id === last) ? last : '', note: '' };
+  const err = h('p', { class: 'error', hidden: true });
+  const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+
+  async function submit(ev) {
+    ev.preventDefault();
+    const f = ev.target;
+    const amount = parseAmount(f.elements.amount.value, x.currency);
+    if (!amount || amount <= 0) return fail('Ingresa un monto mayor que cero.');
+    if (amount > rem) return fail(`Eso supera lo que falta (${formatMoney(rem, x.currency)}).`);
+    if (!f.elements.date.value) return fail('Elige la fecha.');
+    const accountId = f.elements.accountId.value;
+    if (accountId) await store.setMeta('lastAccount', accountId);
+    closeSheet();
+    await saveRecord({
+      ...(existing || {}),
+      col: 'abonos',
+      id: existing ? existing.id : crypto.randomUUID(),
+      debtId: x.id,
+      amount,
+      date: f.elements.date.value,
+      accountId,
+      note: f.elements.note.value.trim(),
+      deleted: false,
+      createdAt: existing ? existing.createdAt : Date.now(),
+    });
+    openDebtDetail(x.id);
+  }
+
+  const owe = x.dir === 'debo';
+  openSheet(h('form', { class: 'form', onsubmit: submit },
+    h('h3', { text: `${existing ? 'Editar' : 'Nuevo'} ${owe ? 'pago' : 'abono'} · ${x.person}` }),
+    h('p', { class: 'hint', text: `Falta ${formatMoney(rem, x.currency)}` }),
+    h('label', {}, `Monto (${x.currency})`,
+      h('input', { class: 'money', type: 'text', name: 'amount', inputmode: 'decimal', autocomplete: 'off', value: s.amount })),
+    h('label', {}, 'Fecha', h('input', { type: 'date', name: 'date', value: s.date, required: true })),
+    h('label', {}, owe ? 'Cuenta de donde sale el pago (opcional)' : 'Cuenta donde entra el abono (opcional)',
+      h('select', { name: 'accountId' },
+        opt('', 'No afecta ninguna cuenta', !s.accountId),
+        accs.map((a) => opt(a.id, a.name, a.id === s.accountId)))),
+    h('label', {}, 'Nota (opcional)', h('input', { type: 'text', name: 'note', autocomplete: 'off', value: s.note })),
+    err,
+    h('div', { class: 'row end wrap' },
+      h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: () => openDebtDetail(x.id) }),
+      existing && h('button', { class: 'btn danger', type: 'button', text: 'Eliminar', onclick: async () => {
+        if (!confirm('¿Eliminar este abono?')) return;
+        closeSheet();
+        await saveRecord({ ...existing, deleted: true });
+        openDebtDetail(x.id);
+      } }),
+      h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }))));
+  if (!existing) {
+    const inp = $('#sheet [name=amount]');
+    if (inp) { inp.focus(); inp.select(); }
   }
 }
 
@@ -705,7 +997,7 @@ function download(name, text) {
 function bindUi() {
   document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
   $('#btn-sync').addEventListener('click', () => doSync(true));
-  $('#fab').addEventListener('click', () => openMovForm());
+  $('#fab').addEventListener('click', () => (ui.tab === 'deudas' ? openDebtForm() : openMovForm()));
   $('#btn-add-cat').addEventListener('click', () => openCatForm());
 
   $('#cfg-form').addEventListener('submit', async (ev) => {

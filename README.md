@@ -86,6 +86,18 @@ Sube los archivos nuevos al repositorio `finanzas-app`. La versión nueva se ve 
 
 La primera vez, en **Resumen**, el botón *Crear cuentas sugeridas* crea Nequi, Nubank (débito y crédito), Rappi (débito y crédito) y Hapi con saldo en cero; toca cada una para poner su saldo.
 
+## Qué incluye la Fase 2: deudas
+
+Pestaña **Deudas** para lo que te deben (*Me deben*) y lo que debes a personas o entidades (*Debo*). Las tarjetas de crédito siguen en Cuentas.
+
+- **Cada deuda** tiene persona o entidad, moneda, monto, fecha, vencimiento opcional y nota.
+- **Abonos parciales:** tocas la deuda y registras abonos (o pagos, si es una deuda tuya) hasta saldarla. No deja abonar más de lo que falta.
+- **Cuenta opcional:** si al crear la deuda o al abonar eliges una cuenta, el saldo de esa cuenta se mueve (te prestan: entra; prestas: sale; te pagan: entra; pagas: sale). Si no eliges cuenta, solo se lleva el registro de la deuda.
+- **Marcar saldada** cierra una deuda a mano (por ejemplo si te la perdonan); queda en "Saldadas" y se puede reabrir.
+- **Resumen:** el neto de cada moneda incluye lo que te deben y lo que debes, y aparece una sección **Vencimientos** con las deudas vencidas o que vencen en los próximos 7 días.
+- **Movimientos** también lista los préstamos y abonos que tocan una cuenta, para que cada cambio de saldo tenga explicación. No cuentan como ingreso ni gasto del mes.
+- Al **eliminar una deuda** se borran sus abonos y se revierte su efecto en las cuentas.
+
 ## Pruebas
 
 - `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos y respaldo).
