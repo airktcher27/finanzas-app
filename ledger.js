@@ -210,3 +210,125 @@ export function cardCycle(acc, movs, flows, today) {
   }
   return { due, cut, nextCut, cutPassed, estimate: false, toPay: Math.max(0, debtAtCut - paid), newCharges };
 }
+
+// ---------- Reportes ----------
+// Gastos (o ingresos) del mes por categoría, en una moneda. La clave '' es "Sin categoría".
+export function categoryTotals(movs, accById, month, currency, kind = 'gasto') {
+  const out = new Map();
+  for (const m of movs) {
+    if (m.kind !== kind || !m.date.startsWith(month)) continue;
+    const a = accById.get(m.accountId);
+    if (!a || a.currency !== currency) continue;
+    const k = m.categoryId || '';
+    out.set(k, (out.get(k) || 0) + m.amount);
+  }
+  return out;
+}
+
+// Los n meses que terminan en `month`, del más antiguo al más reciente.
+export function lastMonths(month, n) {
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) out.push(shiftMonth(month, -i));
+  return out;
+}
+
+export function monthEnd(month) {
+  const [y, m] = month.split('-').map(Number);
+  return mkDate(y, m, 31);
+}
+
+export function monthSeries(movs, accById, months, currency) {
+  return months.map((month) => {
+    const t = monthTotals(movs, accById, month)[currency] || { ingresos: 0, gastos: 0 };
+    return { month, ingresos: t.ingresos, gastos: t.gastos };
+  });
+}
+
+// Fecha más antigua con datos (para no dibujar meses vacíos antes de que empieces a usar la app).
+export function earliestDate(accounts, movs, flows, debts) {
+  const dates = [];
+  for (const m of movs) dates.push(m.date);
+  for (const f of flows) dates.push(f.date);
+  for (const d of debts) dates.push(d.date);
+  for (const a of accounts) if (a.createdAt) dates.push(todayStr(new Date(a.createdAt)));
+  return dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : null;
+}
+
+// Una cuenta "existe" desde su creación o desde su primer movimiento, lo que ocurra antes
+// (su saldo inicial vale desde ese momento).
+function accountStartDate(a, movs, flows) {
+  const dates = [];
+  if (a.createdAt) dates.push(todayStr(new Date(a.createdAt)));
+  for (const m of movs) if (m.accountId === a.id || m.toAccountId === a.id) dates.push(m.date);
+  for (const f of flows) if (f.accountId === a.id) dates.push(f.date);
+  return dates.length ? dates.reduce((x, y) => (x < y ? x : y)) : '0000-00-00';
+}
+
+// Patrimonio neto por moneda al final de `date`: cuentas (incluye tarjetas) + te deben − debes.
+export function netWorthAt(accounts, movs, flows, debts, abonos, date) {
+  const out = {};
+  const bal = accountBalances(
+    accounts,
+    movs.filter((m) => m.date <= date),
+    flows.filter((f) => f.date <= date)
+  );
+  for (const a of accounts) {
+    if (a.archived || accountStartDate(a, movs, flows) > date) continue;
+    out[a.currency] = (out[a.currency] || 0) + (bal.get(a.id) || 0);
+  }
+  for (const d of debts) {
+    if (d.date > date) continue;
+    // Cerrada a mano: desde la fecha en que se cerró; si no hay fecha, se considera cerrada siempre.
+    const closedOn = d.closedAt || (d.closed ? '0000-00-00' : null);
+    if (closedOn && date >= closedOn) continue;
+    let rem = d.amount;
+    for (const a of abonos) if (a.debtId === d.id && a.date <= date) rem -= a.amount;
+    if (rem <= 0) continue;
+    out[d.currency] = (out[d.currency] || 0) + (d.dir === 'debo' ? -rem : rem);
+  }
+  return out;
+}
+
+// Estado de un presupuesto: ok (< 80%), warn (80–100%), over (> 100%).
+export function budgetState(spent, budget) {
+  if (!(budget > 0)) return null;
+  const pct = spent / budget;
+  return { pct, state: pct > 1 ? 'over' : pct >= 0.8 ? 'warn' : 'ok', left: budget - spent };
+}
+
+// Marcas "bonitas" para un eje: devuelve [min, ..., max] con pasos redondos.
+export function niceTicks(min, max, count = 4) {
+  if (min === max) {
+    if (max === 0) return [0, 1];
+    return min > 0 ? niceTicks(0, max, count) : niceTicks(min, 0, count);
+  }
+  const rough = (max - min) / count;
+  const pow = 10 ** Math.floor(Math.log10(rough));
+  const f = rough / pow;
+  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * pow;
+  const lo = Math.floor(min / step) * step;
+  const hi = Math.ceil(max / step) * step;
+  const out = [];
+  for (let v = lo; v <= hi + step / 2; v += step) out.push(Math.round(v * 1e6) / 1e6);
+  return out;
+}
+
+// Puntos del gráfico de patrimonio: fin de cada mes (hasta `maxMonths`) y hoy.
+// Si el historial es corto, el primer punto es el día del primer dato.
+export function netWorthPoints(accounts, movs, flows, debts, abonos, currency, today, maxMonths = 6) {
+  const first = earliestDate(accounts, movs, flows, debts);
+  if (!first) return [];
+  const curMonth = monthOf(today);
+  const minMonth = shiftMonth(curMonth, -(maxMonths - 1));
+  const startMonth = monthOf(first) < minMonth ? minMonth : monthOf(first);
+  const dates = [];
+  for (let m = startMonth; m < curMonth; m = shiftMonth(m, 1)) dates.push({ date: monthEnd(m), month: m });
+  dates.push({ date: today, month: curMonth, today: true });
+  if (monthOf(first) >= minMonth && first < dates[0].date) dates.unshift({ date: first, month: monthOf(first), first: true });
+  const pts = [];
+  for (const p of dates) {
+    const v = netWorthAt(accounts, movs, flows, debts, abonos, p.date)[currency];
+    if (v !== undefined) pts.push({ ...p, value: v });
+  }
+  return pts;
+}

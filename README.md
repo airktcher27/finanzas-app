@@ -107,6 +107,18 @@ En una tarjeta de crédito (editar cuenta) puedes poner el **día de corte** y e
 - Si el corte aún no ocurre, el monto es un estimado ("aprox."): lo que debes hasta hoy, que puede crecer hasta el corte.
 - Si el pago vence en los próximos 7 días, aparece en **Vencimientos** del Resumen. Al tocarlo se abre una transferencia hacia la tarjeta con el monto ya puesto; eliges desde qué cuenta pagas.
 
+## Qué incluye la Fase 3: reportes y presupuesto
+
+Pestaña **Reportes**. Arriba, una sola fila de filtros (mes y moneda) que controla todo lo de abajo:
+
+- **Ingresos, gastos y balance** del mes, con la variación contra el mes anterior (▲/▼ en verde o rojo según si subir es bueno o malo).
+- **Gastos por categoría:** barras ordenadas de mayor a menor, con el monto en la punta y el porcentaje. Si hay más de 8 categorías, las más pequeñas se agrupan en "Otras".
+- **Presupuesto del mes:** defines un tope mensual por categoría (y por moneda) y ves cuánto llevas. Estados: ✓ holgado, ⚠ cerca del límite (desde el 80%) y ✕ excedido. El monto del presupuesto es el mismo cada mes.
+- **Ingresos y gastos** de los últimos 6 meses en columnas.
+- **Patrimonio neto** al cierre de cada mes: cuentas + lo que te deben − tarjetas y deudas. Se va llenando con el tiempo: al principio solo verás desde tu primer dato hasta hoy.
+
+Pasa el dedo o el cursor por un gráfico para ver el detalle, y cada gráfico tiene "Ver como tabla" con los mismos datos. Las transferencias, los pagos de tarjeta y los préstamos no cuentan como ingreso ni gasto. Los presupuestos se sincronizan como el resto de tus datos.
+
 ## Pruebas
 
 - `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos y respaldo).

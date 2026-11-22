@@ -174,4 +174,97 @@ const cmovs2 = [...cmovs, { id: 'c3', kind: 'transferencia', date: '2026-11-12',
 assert.equal(cardCycle(card, cmovs2, [], '2026-11-13').toPay, 0);
 ok('ciclo de tarjeta: extracto fijo tras el corte, estimado antes, pagos posteriores y sin configurar');
 
+
+// --- reportes ---
+import { categoryTotals, lastMonths, monthEnd, monthSeries, earliestDate, netWorthAt, budgetState, niceTicks } from './ledger.js';
+const rmovs = [
+  { id: 'r1', kind: 'gasto', date: '2026-11-03', accountId: 'nequi', amount: 60000, categoryId: 'comida', createdAt: 1 },
+  { id: 'r2', kind: 'gasto', date: '2026-11-04', accountId: 'nequi', amount: 15000, categoryId: 'comida', createdAt: 2 },
+  { id: 'r3', kind: 'gasto', date: '2026-11-05', accountId: 'nequi', amount: 20000, categoryId: '', createdAt: 3 },
+  { id: 'r4', kind: 'gasto', date: '2026-10-15', accountId: 'nequi', amount: 30000, categoryId: 'comida', createdAt: 4 },
+  { id: 'r5', kind: 'gasto', date: '2026-11-06', accountId: 'hapi', amount: 500, categoryId: 'ocio', createdAt: 5 },
+  { id: 'r6', kind: 'ingreso', date: '2026-11-07', accountId: 'nequi', amount: 300000, categoryId: 'sueldo', createdAt: 6 },
+];
+const ct = categoryTotals(rmovs, byId, '2026-11', 'COP');
+assert.equal(ct.get('comida'), 75000);
+assert.equal(ct.get(''), 20000);
+assert.equal(ct.has('ocio'), false); // esa es en USD
+assert.equal(categoryTotals(rmovs, byId, '2026-11', 'USD').get('ocio'), 500);
+assert.equal(categoryTotals(rmovs, byId, '2026-11', 'COP', 'ingreso').get('sueldo'), 300000);
+ok('totales por categoría: filtra por mes, moneda y tipo; "" = sin categoría');
+
+assert.deepEqual(lastMonths('2026-02', 4), ['2025-11', '2025-12', '2026-01', '2026-02']);
+assert.equal(monthEnd('2026-02'), '2026-02-28');
+assert.equal(monthEnd('2026-11'), '2026-11-30');
+const ser = monthSeries(rmovs, byId, ['2026-10', '2026-11'], 'COP');
+assert.deepEqual(ser, [
+  { month: '2026-10', ingresos: 0, gastos: 30000 },
+  { month: '2026-11', ingresos: 300000, gastos: 95000 },
+]);
+ok('serie mensual de ingresos y gastos y fin de mes');
+
+assert.equal(earliestDate([], rmovs, [], []), '2026-10-15');
+assert.equal(earliestDate([], [], [], []), null);
+ok('fecha más antigua con datos');
+
+// Patrimonio en el tiempo: cuenta con saldo inicial 100.000, un gasto el 10/oct y un ingreso el 5/nov.
+const nwAcc = [{ id: 'x', type: 'debito', currency: 'COP', openingBalance: 100000, createdAt: new Date(2026, 9, 1).getTime() }];
+const nwMovs = [
+  { id: 'n1', kind: 'gasto', date: '2026-10-10', accountId: 'x', amount: 30000 },
+  { id: 'n2', kind: 'ingreso', date: '2026-11-05', accountId: 'x', amount: 50000 },
+];
+const nwDebts = [{ id: 'dd', dir: 'me-deben', person: 'Z', currency: 'COP', amount: 40000, date: '2026-10-20', accountId: '', closed: false }];
+const nwAbonos = [{ id: 'aa', debtId: 'dd', amount: 10000, date: '2026-11-02', accountId: '' }];
+assert.deepEqual(netWorthAt(nwAcc, nwMovs, [], nwDebts, nwAbonos, '2026-09-30'), {}); // antes de existir
+assert.deepEqual(netWorthAt(nwAcc, nwMovs, [], nwDebts, nwAbonos, '2026-10-15'), { COP: 70000 });
+assert.deepEqual(netWorthAt(nwAcc, nwMovs, [], nwDebts, nwAbonos, '2026-10-31'), { COP: 70000 + 40000 });
+assert.deepEqual(netWorthAt(nwAcc, nwMovs, [], nwDebts, nwAbonos, '2026-11-30'), { COP: 120000 + 30000 });
+// deuda cerrada a mano desde una fecha: deja de contar desde ese día
+const closedDebts = [{ ...nwDebts[0], closed: true, closedAt: '2026-11-03' }];
+assert.deepEqual(netWorthAt(nwAcc, nwMovs, [], closedDebts, nwAbonos, '2026-11-02'), { COP: 70000 + 40000 - 10000 });
+assert.deepEqual(netWorthAt(nwAcc, nwMovs, [], closedDebts, nwAbonos, '2026-11-30'), { COP: 120000 });
+ok('patrimonio en el tiempo: cuentas desde que existen, deudas con abonos y cierre a mano');
+
+// Coincide con el resumen de hoy
+const todayAll = netWorthAt(accounts, movs, flows, debts, abonos, '2099-01-01');
+const nsAll = netSummary(accounts, accountBalances(accounts, movs, flows), debtTotals(debts, abonos));
+assert.equal(todayAll.COP, nsAll.COP.net);
+assert.equal(todayAll.USD, nsAll.USD.net);
+ok('el patrimonio de hoy coincide con el neto del Resumen');
+
+assert.equal(budgetState(40000, 100000).state, 'ok');
+assert.equal(budgetState(80000, 100000).state, 'warn');
+assert.equal(budgetState(100000, 100000).state, 'warn');
+assert.equal(budgetState(110000, 100000).state, 'over');
+assert.equal(budgetState(110000, 100000).left, -10000);
+assert.equal(budgetState(5, 0), null);
+ok('estado del presupuesto: ok, cerca y excedido');
+
+assert.deepEqual(niceTicks(0, 95000, 4), [0, 50000, 100000]);
+assert.deepEqual(niceTicks(0, 300000, 4), [0, 100000, 200000, 300000]);
+assert.deepEqual(niceTicks(-50, 120, 4), [-50, 0, 50, 100, 150]);
+assert.deepEqual(niceTicks(0, 0, 4), [0, 1]);
+ok('marcas redondas para los ejes');
+
+
+// --- puntos del patrimonio ---
+import { netWorthPoints } from './ledger.js';
+const pa = [{ id: 'p', type: 'debito', currency: 'COP', openingBalance: 100000, createdAt: new Date(2026, 8, 10).getTime() }];
+const pm = [{ id: 'q1', kind: 'ingreso', date: '2026-10-05', accountId: 'p', amount: 50000 }];
+let pts = netWorthPoints(pa, pm, [], [], [], 'COP', '2026-11-22', 6);
+assert.deepEqual(pts.map((x) => x.date), ['2026-09-10', '2026-09-30', '2026-10-31', '2026-11-22']);
+assert.deepEqual(pts.map((x) => x.value), [100000, 100000, 150000, 150000]);
+// historial de un solo día: un punto (el caller muestra el aviso)
+pts = netWorthPoints(pa, [], [], [], [], 'COP', '2026-09-10', 6);
+assert.equal(pts.length, 1);
+// moneda sin cuentas: sin puntos
+assert.deepEqual(netWorthPoints(pa, pm, [], [], [], 'USD', '2026-11-22', 6), []);
+// historial largo: solo los últimos 6 meses (5 fines de mes + hoy)
+const oldAcc = [{ ...pa[0], createdAt: new Date(2025, 0, 1).getTime() }];
+pts = netWorthPoints(oldAcc, [], [], [], [], 'COP', '2026-11-22', 6);
+assert.equal(pts.length, 6);
+assert.equal(pts[0].date, '2026-06-30');
+assert.equal(pts[5].date, '2026-11-22');
+ok('puntos del patrimonio: primer dato, fines de mes, hoy y límite de 6 meses');
+
 console.log(`\nTodas las pruebas pasaron (${n}).`);

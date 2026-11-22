@@ -6,10 +6,12 @@ import { parseAmount, formatMoney, toInput, CURRENCIES } from './money.js';
 import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
   debtFlows, debtRemaining, debtIsDone, debtTotals, addDays, cardCycle,
+  categoryTotals, lastMonths, monthSeries, netWorthPoints, budgetState,
 } from './ledger.js';
+import { rankedBars, groupedColumns, lineChart, tableView, hideTip } from './charts.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.3.1 (Fase 2 + corte de tarjetas)';
+const VERSION = '0.4.0 (Fase 3)';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
 
@@ -17,7 +19,7 @@ let store;
 let deviceId;
 let syncing = false;
 let syncTimer = null;
-const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null };
+const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP' };
 
 // ---------- Ayudantes de DOM ----------
 function h(tag, props, ...kids) {
@@ -191,6 +193,7 @@ async function loadData() {
   const debtIds = new Set(debts.map((x) => x.id));
   const abonos = live(all, 'abonos').filter((a) => debtIds.has(a.debtId));
   const flows = debtFlows(debts, abonos);
+  const budgets = live(all, 'presupuestos');
   const cycles = new Map();
   for (const a of accounts) {
     if (a.type !== 'credito' || a.archived) continue;
@@ -204,6 +207,7 @@ async function loadData() {
     debts,
     abonos,
     flows,
+    budgets,
     cycles,
     debtTot: debtTotals(debts, abonos),
     balances: accountBalances(accounts, movs, flows),
@@ -226,12 +230,14 @@ const dayLabel = (ds) => {
 async function render() {
   ui.data = await loadData();
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === ui.tab));
-  for (const t of ['resumen', 'movs', 'deudas', 'ajustes']) $(`#tab-${t}`).hidden = ui.tab !== t;
+  for (const t of ['resumen', 'movs', 'deudas', 'reportes', 'ajustes']) $(`#tab-${t}`).hidden = ui.tab !== t;
   $('#fab').hidden = ui.tab === 'ajustes';
   $('#fab').setAttribute('aria-label', ui.tab === 'deudas' ? 'Añadir deuda' : 'Añadir movimiento');
+  hideTip();
   if (ui.tab === 'resumen') renderResumen(ui.data);
   else if (ui.tab === 'movs') renderMovs(ui.data);
   else if (ui.tab === 'deudas') renderDeudas(ui.data);
+  else if (ui.tab === 'reportes') renderReportes(ui.data);
   else renderCategories(ui.data);
 }
 
@@ -403,6 +409,199 @@ function renderMovs(d) {
     }
     ul.append(movRow(m, d));
   }
+}
+
+// ---------- Reportes ----------
+const shortMonth = (m) => {
+  const [y, mo] = m.split('-').map(Number);
+  return new Date(y, mo - 1, 1).toLocaleDateString('es-CO', { month: 'short' }).replace('.', '');
+};
+
+function statTile(label, value, delta) {
+  return h('div', { class: 'tile' },
+    h('div', { class: 'lbl', text: label }),
+    h('div', { class: 'val', text: value }),
+    delta && h('div', { class: 'delta ' + (delta.tone || ''), text: delta.text }));
+}
+
+// Variación contra el mes anterior. goodWhenUp: subir es bueno (ingresos) o malo (gastos).
+function deltaVs(curr, prev, goodWhenUp, prevMonth) {
+  if (!prev) return { text: `Sin datos en ${shortMonth(prevMonth)}` };
+  const pct = Math.round(((curr - prev) / prev) * 100);
+  if (pct === 0) return { text: `= igual que ${shortMonth(prevMonth)}` };
+  const up = pct > 0;
+  return { text: `${up ? '▲' : '▼'} ${Math.abs(pct)}% vs ${shortMonth(prevMonth)}`, tone: up === goodWhenUp ? 'good' : 'bad' };
+}
+
+function renderReportes(d) {
+  const root = $('#reportes-body');
+  root.replaceChildren();
+  const hasData = d.movs.length > 0 || d.debts.length > 0 || d.accounts.length > 0;
+  if (!hasData) {
+    root.append(h('div', { class: 'empty' }, h('p', { text: 'Cuando registres movimientos aquí verás tus gráficos y presupuestos.' })));
+    return;
+  }
+  const currencies = [...new Set(d.accounts.map((a) => a.currency))];
+  if (!currencies.includes(ui.rCur)) ui.rCur = currencies[0] || 'COP';
+  const cur = ui.rCur;
+  const month = ui.rMonth;
+  const thisMonth = monthOf(todayStr());
+  const prevMonth = shiftMonth(month, -1);
+  const width = root.clientWidth || 360;
+  const inner = Math.max(width - 30, 240); // el gráfico vive dentro de una tarjeta con padding
+
+  // --- Filtros (una sola fila, arriba) ---
+  root.append(h('div', { class: 'filters' },
+    h('div', { class: 'monthbar' },
+      h('button', { class: 'btn', type: 'button', 'aria-label': 'Mes anterior', text: '◀', onclick: () => { ui.rMonth = shiftMonth(ui.rMonth, -1); render(); } }),
+      h('strong', { text: monthLabel(month) }),
+      h('button', { class: 'btn', type: 'button', 'aria-label': 'Mes siguiente', text: '▶', disabled: month >= thisMonth, onclick: () => { ui.rMonth = shiftMonth(ui.rMonth, 1); render(); } })),
+    currencies.length > 1 && h('select', { 'aria-label': 'Moneda', onchange: (e) => { ui.rCur = e.target.value; render(); } },
+      currencies.map((c) => opt(c, c, c === cur)))));
+
+  // --- Tarjetas de cifras ---
+  const tot = monthTotals(d.movs, d.accById, month)[cur] || { ingresos: 0, gastos: 0 };
+  const prev = monthTotals(d.movs, d.accById, prevMonth)[cur] || { ingresos: 0, gastos: 0 };
+  const bal = tot.ingresos - tot.gastos;
+  root.append(h('div', { class: 'tiles' },
+    statTile('Ingresos', formatMoney(tot.ingresos, cur), deltaVs(tot.ingresos, prev.ingresos, true, prevMonth)),
+    statTile('Gastos', formatMoney(tot.gastos, cur), deltaVs(tot.gastos, prev.gastos, false, prevMonth)),
+    statTile('Balance', (bal > 0 ? '+' : bal < 0 ? '−' : '') + formatMoney(Math.abs(bal), cur), { text: bal >= 0 ? 'Ahorraste este mes' : 'Gastaste más de lo que entró', tone: bal >= 0 ? 'good' : 'bad' })));
+
+  // --- Gastos por categoría ---
+  const ct = categoryTotals(d.movs, d.accById, month, cur, 'gasto');
+  const catName = (id) => (!id ? 'Sin categoría' : d.catById.get(id) ? d.catById.get(id).name : 'Categoría eliminada');
+  const entries = [...ct.entries()].map(([id, v]) => ({ id, label: catName(id), value: v })).sort((a, b) => b.value - a.value);
+  const total = entries.reduce((x, e) => x + e.value, 0);
+  const catCard = h('div', { class: 'chart-card' }, h('h3', { text: 'Gastos por categoría' }));
+  if (!entries.length) {
+    catCard.append(h('p', { class: 'hint', text: `No hay gastos en ${monthLabel(month)}.` }));
+  } else {
+    let shown = entries;
+    if (entries.length > 8) {
+      const rest = entries.slice(7);
+      shown = [...entries.slice(0, 7), { id: '__otras', label: `Otras (${rest.length})`, value: rest.reduce((x, e) => x + e.value, 0) }];
+    }
+    const items = shown.map((e) => ({ label: e.label, value: e.value, share: e.value / total }));
+    catCard.append(h('p', { class: 'hint', text: `Total ${formatMoney(total, cur)}` }), rankedBars(items, cur),
+      tableView(['Categoría', 'Monto', '%'], entries.map((e) => [e.label, formatMoney(e.value, cur), `${Math.round((e.value / total) * 100)}%`])));
+  }
+  root.append(catCard);
+
+  // --- Presupuesto ---
+  const budMap = new Map(d.budgets.filter((b) => b.currency === cur).map((b) => [b.categoryId, b]));
+  const budCard = h('div', { class: 'chart-card' }, h('h3', { text: 'Presupuesto del mes' }));
+  const rows = [...budMap.values()]
+    .filter((b) => d.catById.has(b.categoryId))
+    .map((b) => ({ b, name: catName(b.categoryId), spent: ct.get(b.categoryId) || 0 }))
+    .map((r) => ({ ...r, st: budgetState(r.spent, r.b.amount) }))
+    .sort((a, b) => b.st.pct - a.st.pct);
+  if (!rows.length) {
+    budCard.append(h('p', { class: 'hint', text: `Define cuánto quieres gastar al mes por categoría (en ${cur}) y verás cuánto llevas.` }));
+  } else {
+    const spentSum = rows.reduce((x, r) => x + r.spent, 0);
+    const budSum = rows.reduce((x, r) => x + r.b.amount, 0);
+    const all = budgetState(spentSum, budSum);
+    budCard.append(h('p', { class: 'hint', text: `Llevas ${formatMoney(spentSum, cur)} de ${formatMoney(budSum, cur)} presupuestados (${Math.round(all.pct * 100)}%).` }));
+    for (const r of rows) {
+      const { st } = r;
+      const msg = st.state === 'over' ? `✕ Excedido por ${formatMoney(-st.left, cur)}`
+        : st.state === 'warn' ? `⚠ Cerca del límite · te quedan ${formatMoney(st.left, cur)}`
+        : `✓ Te quedan ${formatMoney(st.left, cur)}`;
+      budCard.append(h('div', { class: 'bud' },
+        h('div', { class: 'row' }, h('span', { text: r.name }), h('span', { text: `${formatMoney(r.spent, cur)} / ${formatMoney(r.b.amount, cur)}` })),
+        h('div', { class: 'meter ' + st.state, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.min(Math.round(st.pct * 100), 999)), 'aria-label': `${r.name}: ${Math.round(st.pct * 100)}% del presupuesto` },
+          h('div', { style: `width:${Math.min(st.pct, 1) * 100}%` })),
+        h('div', { class: 'state ' + st.state, text: msg })));
+    }
+  }
+  budCard.append(h('div', { class: 'row wrap', style: 'margin-top:8px' },
+    h('button', { class: 'btn', type: 'button', text: rows.length ? 'Editar presupuestos' : 'Definir presupuestos', onclick: () => openBudgetForm(cur) })));
+  root.append(budCard);
+
+  // --- Ingresos y gastos, últimos 6 meses ---
+  const months = lastMonths(month, 6);
+  const ser = monthSeries(d.movs, d.accById, months, cur);
+  const serCard = h('div', { class: 'chart-card' }, h('h3', { text: 'Ingresos y gastos' }), h('p', { class: 'hint', text: 'Últimos 6 meses' }));
+  if (ser.every((x) => x.ingresos === 0 && x.gastos === 0)) {
+    serCard.append(h('p', { class: 'hint', text: 'Todavía no hay ingresos ni gastos en estos meses.' }));
+  } else {
+    const series = [{ name: 'Ingresos', color: 'var(--s1)' }, { name: 'Gastos', color: 'var(--s2)' }];
+    serCard.append(
+      h('div', { class: 'legend' }, series.map((x) => h('span', {}, h('i', { style: `background:${x.color}` }), x.name))),
+      groupedColumns(inner, ser.map((x) => ({ label: shortMonth(x.month), full: monthLabel(x.month), values: [x.ingresos, x.gastos] })), cur, series),
+      tableView(['Mes', 'Ingresos', 'Gastos'], ser.map((x) => [monthLabel(x.month), formatMoney(x.ingresos, cur), formatMoney(x.gastos, cur)])));
+  }
+  root.append(serCard);
+
+  // --- Patrimonio neto ---
+  const pts = netWorthPoints(d.accounts, d.movs, d.flows, d.debts, d.abonos, cur, todayStr(), 6);
+  const nwCard = h('div', { class: 'chart-card' }, h('h3', { text: 'Patrimonio neto' }),
+    h('p', { class: 'hint', text: 'Cuentas + lo que te deben − tarjetas y deudas, al cierre de cada mes' }));
+  if (pts.length < 2) {
+    nwCard.append(h('p', { class: 'hint', text: pts.length ? `Hoy: ${formatMoney(pts[0].value, cur)}. La línea aparece cuando haya al menos dos fechas con datos.` : 'Aún no hay datos para esta moneda.' }));
+  } else {
+    const fullDate = (p) => (p.today ? 'Hoy · ' : '') + shortDate(p.date);
+    const points = pts.map((p) => ({
+      date: p.date,
+      label: p.today ? 'Hoy' : p.first ? shortDate(p.date) : shortMonth(p.month),
+      full: p.today || p.first ? fullDate(p) : `Fin de ${monthLabel(p.month)}`,
+      value: p.value,
+    }));
+    nwCard.append(lineChart(inner, points, cur, 'Patrimonio neto', 'var(--s1)'),
+      tableView(['Fecha', 'Patrimonio'], points.map((p) => [p.full, formatMoney(p.value, cur)])));
+  }
+  root.append(nwCard);
+}
+
+function openBudgetForm(cur) {
+  const d = ui.data;
+  if (!d) return;
+  const existing = new Map(d.budgets.filter((b) => b.currency === cur).map((b) => [b.categoryId, b]));
+  const cats = d.cats.filter((c) => c.kind === 'gasto' && (!c.archived || existing.has(c.id)));
+  const err = h('p', { class: 'error', hidden: true });
+
+  async function submit(ev) {
+    ev.preventDefault();
+    const f = ev.target;
+    const recs = [];
+    for (const c of cats) {
+      const raw = f.elements['b-' + c.id].value.trim();
+      const prev = existing.get(c.id);
+      if (!raw) {
+        if (prev) recs.push({ ...prev, deleted: true });
+        continue;
+      }
+      const amount = parseAmount(raw, cur);
+      if (!amount || amount <= 0) {
+        err.textContent = `Revisa el monto de "${c.name}".`;
+        err.hidden = false;
+        return;
+      }
+      if (prev && prev.amount === amount) continue;
+      recs.push({
+        ...(prev || {}),
+        col: 'presupuestos',
+        id: `bud-${c.id}-${cur}`,
+        categoryId: c.id,
+        currency: cur,
+        amount,
+        deleted: false,
+      });
+    }
+    closeSheet();
+    if (recs.length) await saveRecords(recs);
+  }
+
+  openSheet(h('form', { class: 'form', onsubmit: submit },
+    h('h3', { text: `Presupuesto mensual (${cur})` }),
+    h('p', { class: 'hint', text: 'Cuánto quieres gastar como máximo cada mes en cada categoría. Déjalo vacío si no quieres presupuesto en esa categoría.' }),
+    cats.map((c) => h('label', {}, c.name,
+      h('input', { type: 'text', name: 'b-' + c.id, inputmode: 'decimal', placeholder: 'Sin presupuesto', autocomplete: 'off', value: existing.has(c.id) ? toInput(existing.get(c.id).amount, cur) : '' }))),
+    err,
+    h('div', { class: 'row end wrap' },
+      h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
+      h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }))));
 }
 
 const shortDate = (ds) => {
@@ -765,10 +964,10 @@ function openDebtDetail(id) {
       !done && h('button', { class: 'btn primary', type: 'button', text: x.dir === 'debo' ? 'Registrar pago' : 'Registrar abono', onclick: () => openAbonoForm(x.id) }),
       h('button', { class: 'btn', type: 'button', text: 'Editar', onclick: () => openDebtForm(x) }),
       done && x.closed
-        ? h('button', { class: 'btn', type: 'button', text: 'Reabrir', onclick: async () => { await saveRecord({ ...x, closed: false }); openDebtDetail(x.id); } })
+        ? h('button', { class: 'btn', type: 'button', text: 'Reabrir', onclick: async () => { await saveRecord({ ...x, closed: false, closedAt: '' }); openDebtDetail(x.id); } })
         : !done && h('button', { class: 'btn', type: 'button', text: 'Marcar saldada', onclick: async () => {
             if (!confirm('¿Marcar como saldada? Lo que falta deja de contar como pendiente.')) return;
-            await saveRecord({ ...x, closed: true });
+            await saveRecord({ ...x, closed: true, closedAt: todayStr() });
             openDebtDetail(x.id);
           } })),
     h('div', { class: 'row between wrap' },
@@ -1115,6 +1314,16 @@ function bindUi() {
     } catch (e) {
       setStatus(errorMessage(e), 'err');
     }
+  });
+
+  // Al girar el celular o cambiar el tamaño, los gráficos se redibujan al ancho nuevo.
+  let resizeTimer = null;
+  let lastWidth = window.innerWidth;
+  window.addEventListener('resize', () => {
+    if (ui.tab !== 'reportes' || window.innerWidth === lastWidth) return;
+    lastWidth = window.innerWidth;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(render, 150);
   });
 
   window.addEventListener('online', () => doSync(false));
