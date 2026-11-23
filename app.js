@@ -298,6 +298,22 @@ function cardDueRow(a, c) {
     h('div', { class: 'amt neg' }, formatMoney(c.toPay, a.currency), h('small', { text: 'Vence ' + shortDate(c.due) })));
 }
 
+// Sección plegable del Resumen; recuerda abierta/cerrada en este dispositivo.
+const COLL_KEY = 'finanzas.collapsed';
+function loadCollapsed() { try { return JSON.parse(localStorage.getItem(COLL_KEY)) || {}; } catch { return {}; } }
+function collapsible(key, title, note) {
+  const body = h('div', { class: 'coll-body' });
+  const el = h('details', { class: 'coll', 'data-key': key },
+    h('summary', {}, h('span', { text: title }), note && h('span', { class: 'coll-note', text: note })), body);
+  el.open = !loadCollapsed()[key];
+  el.addEventListener('toggle', () => {
+    const c = loadCollapsed();
+    if (el.open) delete c[key]; else c[key] = true;
+    try { localStorage.setItem(COLL_KEY, JSON.stringify(c)); } catch { /* sin almacenamiento */ }
+  });
+  return { el, body };
+}
+
 function renderResumen(d) {
   const root = $('#resumen-body');
   root.replaceChildren();
@@ -345,7 +361,9 @@ function renderResumen(d) {
 
   const active = d.accounts.filter((a) => !a.archived);
   const archived = d.accounts.filter((a) => a.archived);
-  root.append(h('div', { class: 'section-title', text: 'Cuentas' }), h('div', { class: 'list' }, active.map((a) => accountRow(a, d))));
+  const accBox = collapsible('accounts', 'Cuentas', `${active.length}`);
+  accBox.body.append(h('div', { class: 'list' }, active.map((a) => accountRow(a, d))));
+  root.append(accBox.el);
   if (archived.length) {
     root.append(h('div', { class: 'section-title', text: 'Archivadas' }), h('div', { class: 'list' }, archived.map((a) => accountRow(a, d))));
   }
@@ -364,9 +382,10 @@ function savingsGoals(d) {
 
 function renderSavings(root, d) {
   const goals = savingsGoals(d);
-  root.append(h('div', { class: 'section-title', text: 'Meta de ahorro' }));
+  const box = collapsible('savings', 'Meta de ahorro');
+  root.append(box.el);
   if (!goals.length) {
-    root.append(h('div', { class: 'chart-card' },
+    box.body.append(h('div', { class: 'chart-card' },
       h('p', { class: 'hint', text: 'Define cuánto quieres ahorrar al mes y al año en tu cajita, y sigue cuánto aportas cada mes.' }),
       h('button', { class: 'btn primary', type: 'button', text: 'Definir meta de ahorro', onclick: () => openGoalForm() })));
     return;
@@ -388,7 +407,7 @@ function renderSavings(root, d) {
     const behind = !yearDone && (need.left === 0 || need.perMonth > monthly);
     const meter = (pct, label, state, aria) => h('div', { class: 'meter ' + state, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct * 100)), 'aria-label': aria },
       h('div', { style: `width:${Math.min(pct, 1) * 100}%` }));
-    root.append(h('div', { class: 'chart-card sav' },
+    box.body.append(h('div', { class: 'chart-card sav' },
       h('div', { class: 'row between' },
         h('div', {}, h('h3', { text: goalName(g, acc) }), g.name && g.name.trim() && g.name.trim() !== acc.name && h('div', { class: 'sub', text: acc.name })),
         h('strong', { text: formatMoney(d.balances.get(acc.id) || 0, cur) })),
@@ -408,7 +427,7 @@ function renderSavings(root, d) {
         h('button', { class: 'btn primary', type: 'button', text: '＋ Aportar', onclick: () => openMovForm(null, { kind: 'transferencia', toAccountId: acc.id, amount: '' }) }),
         h('button', { class: 'btn', type: 'button', text: 'Editar meta', onclick: () => openGoalForm(g) }))));
   }
-  root.append(h('div', { class: 'row wrap', style: 'margin:-4px 0 12px' },
+  box.body.append(h('div', { class: 'row wrap', style: 'margin:-4px 0 12px' },
     h('button', { class: 'btn', type: 'button', text: '＋ Otra meta de ahorro', onclick: () => openGoalForm() })));
 }
 

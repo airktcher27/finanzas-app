@@ -219,3 +219,13 @@ svg [tabindex]:focus-visible { outline: 2px solid var(--accent); }
 .line .pos { color: var(--ok); }
 .line .neg { color: var(--danger); }
 .list + .chart-card { margin-top: 14px; }
+
+/* Secciones plegables */
+.coll { margin: 18px 0 8px; }
+.coll > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; padding: 6px 0; font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; user-select: none; }
+.coll > summary::-webkit-details-marker { display: none; }
+.coll > summary::before { content: '▸'; display: inline-block; transition: transform .15s; font-size: .9rem; }
+.coll[open] > summary::before { transform: rotate(90deg); }
+.coll-note { margin-left: auto; font-size: .8rem; text-transform: none; letter-spacing: 0; }
+.coll-body { padding-top: 6px; }
+.coll-body > :last-child { margin-bottom: 0; }
