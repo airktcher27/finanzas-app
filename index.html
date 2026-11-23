@@ -25,16 +25,19 @@
 
   <header class="top">
     <h1>Finanzas</h1>
-    <button id="btn-sync" class="btn primary" type="button" aria-label="Sincronizar">⟳ Sincronizar</button>
+    <div class="row">
+      <button id="btn-sync" class="btn primary" type="button" aria-label="Sincronizar">⟳ Sincronizar</button>
+      <button id="btn-settings" class="btn icon" type="button" aria-label="Ajustes" title="Ajustes">⚙</button>
+    </div>
   </header>
   <div id="status" class="status" role="status" aria-live="polite"></div>
 
   <nav class="tabs">
     <button type="button" data-tab="resumen" class="active">Resumen</button>
     <button type="button" data-tab="movs">Movimientos</button>
+    <button type="button" data-tab="inv">Inversiones</button>
     <button type="button" data-tab="deudas">Deudas</button>
     <button type="button" data-tab="reportes">Reportes</button>
-    <button type="button" data-tab="ajustes">Ajustes</button>
   </nav>
 
   <main>
@@ -46,6 +49,10 @@
       <div id="movs-body"></div>
     </section>
 
+    <section id="tab-inv" hidden>
+      <div id="inv-body"></div>
+    </section>
+
     <section id="tab-deudas" hidden>
       <div id="deudas-body"></div>
     </section>
@@ -55,6 +62,7 @@
     </section>
 
     <section id="tab-ajustes" hidden>
+      <h2>Ajustes</h2>
       <h2>Categorías</h2>
       <p class="hint">Toca una para editarla o archivarla. Las archivadas dejan de aparecer al registrar, pero los movimientos viejos las conservan.</p>
       <div id="cat-list"></div>
@@ -83,6 +91,18 @@
         <div class="row wrap">
           <button class="btn primary" type="submit">Guardar y sincronizar</button>
           <button id="btn-forget-key" class="btn" type="button">Olvidar contraseña en este dispositivo</button>
+        </div>
+      </form>
+
+      <h2>Precios de inversiones</h2>
+      <p class="hint">Opcional. Con una clave gratis de <strong>Twelve Data</strong> (twelvedata.com) la app puede traer el precio de tus acciones y ETF. La clave se guarda solo en este dispositivo (no se sincroniza). Sin clave, escribes los precios a mano.</p>
+      <form id="px-form" class="form" autocomplete="off">
+        <label>Clave de Twelve Data
+          <input id="px-key" type="password" autocapitalize="off" spellcheck="false">
+        </label>
+        <div class="row wrap">
+          <button class="btn primary" type="submit">Guardar clave</button>
+          <button id="px-clear" class="btn" type="button">Quitar clave</button>
         </div>
       </form>
 

@@ -95,7 +95,7 @@ export function tableView(headers, rows, label = 'Ver como tabla') {
 
 // ---------- Barras ordenadas (HTML): una serie, un color ----------
 // items: [{ label, value, share (0..1) }]  ·  el valor va en la punta de la barra
-export function rankedBars(items, cur) {
+export function rankedBars(items, cur, shareLabel = 'del gasto del mes') {
   const max = Math.max(...items.map((i) => i.value), 1);
   const root = el('div', { class: 'rb' });
   for (const it of items) {
@@ -112,7 +112,7 @@ export function rankedBars(items, cur) {
     const show = (ev) => {
       const r = ev.currentTarget.getBoundingClientRect();
       showTip(ev.clientX || r.left + r.width / 2, ev.clientY || r.top, it.label, [
-        { label: 'del gasto del mes', value: `${Math.round(it.share * 100)}%` },
+        { label: shareLabel, value: `${Math.round(it.share * 100)}%` },
         { label: 'total', value: formatMoney(it.value, cur) },
       ]);
     };

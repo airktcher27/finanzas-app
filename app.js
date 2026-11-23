@@ -2,17 +2,20 @@ import { openStore } from './store.js';
 import { createGithub } from './github.js';
 import { runSync, exportEncrypted, importEncrypted } from './sync.js';
 import { SyncError } from './errors.js';
-import { parseAmount, formatMoney, toInput, CURRENCIES } from './money.js';
+import { parseAmount, formatMoney, toInput, dec, CURRENCIES } from './money.js';
 import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
   debtFlows, debtRemaining, debtIsDone, debtTotals, addDays, cardCycle,
   categoryTotals, lastMonths, monthSeries, netWorthPoints, budgetState,
   savingsMonth, savingsYear, goalTargets, yearNeeded,
 } from './ledger.js';
+import { normSymbol, parseQty, computePositions, firstOversold, valuePositions, invFlows } from './invest.js';
+import { fetchPrices } from './prices.js';
 import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTip } from './charts.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.5.0 (Fase 3 + meta de ahorro)';
+const VERSION = '0.6.0 (Fase 4: inversiones)';
+const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
 
@@ -20,7 +23,7 @@ let store;
 let deviceId;
 let syncing = false;
 let syncTimer = null;
-const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP' };
+const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP', pxMsg: '', pxBusy: false, lastPxTry: 0 };
 
 // ---------- Ayudantes de DOM ----------
 function h(tag, props, ...kids) {
@@ -193,7 +196,10 @@ async function loadData() {
   const debts = live(all, 'deudas').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const debtIds = new Set(debts.map((x) => x.id));
   const abonos = live(all, 'abonos').filter((a) => debtIds.has(a.debtId));
-  const flows = debtFlows(debts, abonos);
+  const ops = live(all, 'inv');
+  const prices = new Map(live(all, 'precios').map((r) => [r.symbol, r]));
+  const flows = [...debtFlows(debts, abonos), ...invFlows(ops)];
+  const inv = valuePositions(computePositions(ops), prices);
   const budgets = live(all, 'presupuestos');
   const goals = live(all, 'metas');
   const cycles = new Map();
@@ -209,6 +215,9 @@ async function loadData() {
     debts,
     abonos,
     flows,
+    ops,
+    prices,
+    inv,
     budgets,
     goals,
     cycles,
@@ -233,20 +242,24 @@ const dayLabel = (ds) => {
 async function render() {
   ui.data = await loadData();
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === ui.tab));
-  for (const t of ['resumen', 'movs', 'deudas', 'reportes', 'ajustes']) $(`#tab-${t}`).hidden = ui.tab !== t;
+  for (const t of ['resumen', 'movs', 'inv', 'deudas', 'reportes', 'ajustes']) $(`#tab-${t}`).hidden = ui.tab !== t;
+  $('#btn-settings').classList.toggle('active', ui.tab === 'ajustes');
   $('#fab').hidden = ui.tab === 'ajustes';
-  $('#fab').setAttribute('aria-label', ui.tab === 'deudas' ? 'Añadir deuda' : 'Añadir movimiento');
+  $('#fab').setAttribute('aria-label', ui.tab === 'deudas' ? 'Añadir deuda' : ui.tab === 'inv' ? 'Añadir operación' : 'Añadir movimiento');
   hideTip();
   if (ui.tab === 'resumen') renderResumen(ui.data);
   else if (ui.tab === 'movs') renderMovs(ui.data);
+  else if (ui.tab === 'inv') renderInv(ui.data);
   else if (ui.tab === 'deudas') renderDeudas(ui.data);
   else if (ui.tab === 'reportes') renderReportes(ui.data);
   else renderCategories(ui.data);
 }
 
-function showTab(name) {
+async function showTab(name) {
   ui.tab = name;
-  return render();
+  await render();
+  // Al entrar a Inversiones, si hay clave, actualiza precios (máx. una vez cada 10 min).
+  if (name === 'inv' && getPxKey() && Date.now() - ui.lastPxTry > 600000) refreshPrices(false);
 }
 
 function accountRow(a, d) {
@@ -295,7 +308,7 @@ function renderResumen(d) {
       h('button', { class: 'btn', type: 'button', onclick: () => openAccountForm(), text: 'Crear una cuenta propia' })));
     return;
   }
-  const net = netSummary(d.accounts, d.balances, d.debtTot);
+  const net = netSummary(d.accounts, d.balances, d.debtTot, d.inv.totals);
   const totals = monthTotals(d.movs, d.accById, monthOf(todayStr()));
   const cards = h('div', { class: 'cards' });
   for (const cur of Object.keys(net)) {
@@ -306,6 +319,7 @@ function renderResumen(d) {
       h('div', { class: 'big', text: formatMoney(n.net, cur) }),
       h('div', { class: 'line' }, h('span', { text: 'Disponible' }), h('span', { text: formatMoney(n.assets, cur) })),
       n.cards !== 0 && h('div', { class: 'line' }, h('span', { text: 'Tarjetas' }), h('span', { text: formatMoney(n.cards, cur) })),
+      n.inv && h('div', { class: 'line' }, h('span', { text: 'Inversiones' }), h('span', { text: formatMoney(n.inv, cur) })),
       n.toMe !== 0 && h('div', { class: 'line' }, h('span', { text: 'Te deben' }), h('span', { text: formatMoney(n.toMe, cur) })),
       n.iOwe !== 0 && h('div', { class: 'line' }, h('span', { text: 'Debes (préstamos)' }), h('span', { text: formatMoney(-n.iOwe, cur) })),
       h('div', { class: 'line' }, h('span', { text: 'Ingresos este mes' }), h('span', { text: formatMoney(t.ingresos, cur) })),
@@ -342,6 +356,8 @@ function renderResumen(d) {
 // ---------- Meta de ahorro (cajita) ----------
 const sumBy = (arr, f) => arr.reduce((t, x) => t + f(x), 0);
 
+const goalName = (g, acc) => (g.name && g.name.trim()) || acc.name;
+
 function savingsGoals(d) {
   return d.goals.filter((g) => d.accById.has(g.accountId) && !d.accById.get(g.accountId).archived);
 }
@@ -374,7 +390,7 @@ function renderSavings(root, d) {
       h('div', { style: `width:${Math.min(pct, 1) * 100}%` }));
     root.append(h('div', { class: 'chart-card sav' },
       h('div', { class: 'row between' },
-        h('h3', { text: acc.name }),
+        h('div', {}, h('h3', { text: goalName(g, acc) }), g.name && g.name.trim() && g.name.trim() !== acc.name && h('div', { class: 'sub', text: acc.name })),
         h('strong', { text: formatMoney(d.balances.get(acc.id) || 0, cur) })),
       h('div', { class: 'bud' },
         h('div', { class: 'row' }, h('span', { text: 'Este mes' }), h('span', { text: `${formatMoney(m.aportes, cur)} / ${formatMoney(monthly, cur)}` })),
@@ -417,16 +433,17 @@ function openGoalForm(existing) {
   const s = existing
     ? {
         accountId: existing.accountId,
+        name: existing.name || '',
         monthly: existing.monthly ? toInput(existing.monthly, curOf(existing.accountId)) : '',
         annual: existing.annual ? toInput(existing.annual, curOf(existing.accountId)) : '',
       }
-    : { accountId: accs[0].id, monthly: '', annual: '' };
+    : { accountId: accs[0].id, name: '', monthly: '', annual: '' };
   const body = h('div');
   const err = h('p', { class: 'error', hidden: true });
   const read = () => {
     const f = body.querySelector('form');
     if (!f) return;
-    for (const k of ['accountId', 'monthly', 'annual']) if (f.elements[k]) s[k] = f.elements[k].value;
+    for (const k of ['accountId', 'name', 'monthly', 'annual']) if (f.elements[k]) s[k] = f.elements[k].value;
   };
   const rebuild = () => { read(); build(); };
 
@@ -445,6 +462,7 @@ function openGoalForm(existing) {
       col: 'metas',
       id: `meta-${s.accountId}`,
       accountId: s.accountId,
+      name: s.name.trim().slice(0, 40),
       monthly: monthly || 0,
       annual: annual || 0,
       deleted: false,
@@ -460,6 +478,8 @@ function openGoalForm(existing) {
       h('label', {}, 'Cuenta de ahorro',
         h('select', { name: 'accountId', disabled: !!existing, onchange: rebuild },
           accs.map((a) => opt(a.id, `${a.name} (${a.currency})`, a.id === s.accountId)))),
+      h('label', {}, 'Nombre de la meta (opcional)',
+        h('input', { type: 'text', name: 'name', maxlength: '40', autocomplete: 'off', placeholder: 'Ej: Fondo de emergencia', value: s.name })),
       h('label', {}, `Meta mensual (${cur})`,
         h('input', { class: 'money', type: 'text', name: 'monthly', inputmode: 'decimal', placeholder: '0', autocomplete: 'off', value: s.monthly })),
       h('label', {}, `Meta anual (${cur}, opcional)`,
@@ -482,6 +502,14 @@ function openGoalForm(existing) {
 }
 
 function movRow(m, d) {
+  if (m.kind === 'inv') {
+    const acc = d.accById.get(m.accountId);
+    return h('button', { type: 'button', class: 'item', onclick: () => openPositionDetail(m.symbol) },
+      h('div', { class: 'main' },
+        h('div', { class: 'title', text: m.label }),
+        h('div', { class: 'sub', text: ['Inversión', acc ? acc.name : null].filter(Boolean).join(' · ') })),
+      h('div', { class: 'amt ' + (m.effect >= 0 ? 'pos' : 'neg'), text: (m.effect >= 0 ? '+' : '−') + formatMoney(Math.abs(m.effect), acc ? acc.currency : 'USD') }));
+  }
   if (m.kind === 'deuda' || m.kind === 'abono') {
     const acc = d.accById.get(m.accountId);
     const cls = m.effect >= 0 ? 'pos' : 'neg';
@@ -556,6 +584,310 @@ function renderMovs(d) {
     }
     ul.append(movRow(m, d));
   }
+}
+
+
+// ---------- Inversiones ----------
+const getPxKey = () => { try { return localStorage.getItem(PX_KEY) || ''; } catch { return ''; } };
+const fmtQty = (q) => new Intl.NumberFormat('es-CO', { maximumFractionDigits: 8 }).format(q);
+const signedMoney = (v, cur) => (v > 0 ? '+' : v < 0 ? '−' : '') + formatMoney(Math.abs(v), cur);
+const pctTxt = (p) => (p === null || p === undefined ? '' : `${p > 0 ? '+' : p < 0 ? '−' : ''}${(Math.abs(p) * 100).toFixed(1).replace('.', ',')}%`);
+const gainText = (u, pct, cur) => `${u > 0 ? '▲ ' : u < 0 ? '▼ ' : ''}${signedMoney(u, cur)}${pct === null || pct === undefined ? '' : ` (${pctTxt(pct)})`}`;
+const toneOf = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+// Precio por acción escrito como "200.99" o "200,9912": hasta 4 decimales (parseAmount solo admite 2).
+const parsePrice = (text, cur) => {
+  const q = parseQty(text);
+  return q ? Math.round(q * 10 ** dec(cur)) : null;
+};
+
+function positionRow(r) {
+  const cur = r.currency;
+  const price = r.hasPrice ? ` · Precio ${formatMoney(Math.round(r.price), cur)}` : ' · sin precio (a costo)';
+  return h('button', { type: 'button', class: 'item', onclick: () => openPositionDetail(r.symbol) },
+    h('div', { class: 'main' },
+      h('div', { class: 'title', text: r.symbol }),
+      h('div', { class: 'sub', text: `${fmtQty(r.qty)} acc. · costo prom. ${formatMoney(Math.round(r.avgCost), cur)}` }),
+      h('div', { class: 'sub', text: price.replace(/^ · /, '') })),
+    h('div', { class: 'amt' }, formatMoney(r.value, cur),
+      h('small', { class: toneOf(r.unrealized), text: r.hasPrice ? gainText(r.unrealized, r.pct, cur) : 'sin precio' })));
+}
+
+function renderInv(d) {
+  const root = $('#inv-body');
+  root.replaceChildren();
+  if (!d.ops.length) {
+    root.append(h('div', { class: 'empty' },
+      h('p', { text: 'Aquí llevas tus acciones y ETF: cuánto tienes, a qué costo promedio y cuánto ganas o pierdes.' }),
+      h('p', { class: 'hint', text: 'Si ya tienes acciones, regístralas como una compra (con la fecha aproximada) y deja la cuenta en "No afecta ninguna cuenta", para no mover tu saldo.' }),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => openInvForm(), text: '＋ Registrar operación' })));
+    return;
+  }
+  const { rows, totals } = d.inv;
+  const open = rows.filter((r) => r.open);
+  const closed = rows.filter((r) => !r.open);
+  const latest = Math.max(0, ...open.filter((r) => r.hasPrice).map((r) => r.priceAt || 0));
+  root.append(h('div', { class: 'pxbar' },
+    h('p', { class: 'hint', text: ui.pxMsg || (latest ? `Precios de ${timeAgo(latest)}.` : 'Sin precios todavía: se valora al costo.') }),
+    h('button', { class: 'btn', type: 'button', text: '⟳ Actualizar precios', disabled: ui.pxBusy, onclick: () => refreshPrices(true) })));
+
+  const cards = h('div', { class: 'cards' });
+  for (const [cur, t] of Object.entries(totals)) {
+    const pct = t.cost > 0 ? t.unrealized / t.cost : null;
+    cards.append(h('div', { class: 'card' },
+      h('div', { class: 'cur', text: `Inversiones · ${CURRENCIES[cur] ? CURRENCIES[cur].label : cur}` }),
+      h('div', { class: 'big', text: formatMoney(t.value, cur) }),
+      h('div', { class: 'line' }, h('span', { text: 'Costo' }), h('span', { text: formatMoney(t.cost, cur) })),
+      h('div', { class: 'line' }, h('span', { text: 'Ganancia sin vender' }), h('span', { class: toneOf(t.unrealized), text: gainText(t.unrealized, pct, cur) })),
+      t.realized !== 0 && h('div', { class: 'line' }, h('span', { text: 'Ganancia realizada' }), h('span', { class: toneOf(t.realized), text: signedMoney(t.realized, cur) })),
+      t.dividends !== 0 && h('div', { class: 'line' }, h('span', { text: 'Dividendos' }), h('span', { text: formatMoney(t.dividends, cur) })),
+      t.missing > 0 && h('p', { class: 'hint', style: 'margin:6px 0 0', text: `${t.missing} posición(es) sin precio: se cuentan al costo.` })));
+  }
+  root.append(cards);
+
+  if (open.length) root.append(h('div', { class: 'section-title', text: 'Posiciones' }), h('div', { class: 'list' }, open.map(positionRow)));
+
+  for (const cur of Object.keys(totals)) {
+    const list = open.filter((r) => r.currency === cur);
+    const total = list.reduce((a, r) => a + r.value, 0);
+    if (list.length < 2 || total <= 0) continue;
+    root.append(h('div', { class: 'chart-card' }, h('h3', { text: `Distribución · ${cur}` }),
+      h('p', { class: 'hint', text: 'Cuánto pesa cada posición en tu portafolio' }),
+      rankedBars(list.map((r) => ({ label: r.symbol, value: r.value, share: r.value / total })), cur, 'del portafolio')));
+  }
+
+  if (closed.length) {
+    root.append(h('div', { class: 'section-title', text: 'Cerradas' }), h('div', { class: 'list' }, closed.map((r) =>
+      h('button', { type: 'button', class: 'item done', onclick: () => openPositionDetail(r.symbol) },
+        h('div', { class: 'main' }, h('div', { class: 'title', text: r.symbol }), h('div', { class: 'sub', text: 'Vendida por completo' })),
+        h('div', { class: 'amt ' + toneOf(r.realized), text: signedMoney(r.realized, r.currency) })))));
+  }
+  root.append(h('div', { class: 'row wrap', style: 'margin-top:14px' },
+    h('button', { class: 'btn', type: 'button', onclick: () => openInvForm(), text: '＋ Nueva operación' })));
+}
+
+async function refreshPrices(manual) {
+  const d = ui.data;
+  if (!d || ui.pxBusy) return;
+  const syms = d.inv.rows.filter((r) => r.open && r.currency === 'USD').map((r) => r.symbol);
+  const key = getPxKey();
+  if (!syms.length) {
+    if (manual) { ui.pxMsg = 'No hay posiciones en USD para actualizar.'; await render(); }
+    return;
+  }
+  if (!key) {
+    if (manual) {
+      openSheet(h('div', { class: 'form' },
+        h('h3', { text: 'Precios automáticos' }),
+        h('p', { class: 'hint', text: 'Para traer precios solos necesitas una clave gratis de Twelve Data (en Ajustes se guarda). Mientras tanto puedes escribir el precio a mano: toca una posición y usa "Precio actual".' }),
+        h('div', { class: 'row end wrap' },
+          h('button', { class: 'btn', type: 'button', text: 'Cerrar', onclick: closeSheet }),
+          h('button', { class: 'btn primary', type: 'button', text: 'Ir a Ajustes', onclick: () => { closeSheet(); showTab('ajustes'); } }))));
+    }
+    return;
+  }
+  ui.lastPxTry = Date.now();
+  ui.pxBusy = true;
+  ui.pxMsg = 'Consultando precios…';
+  if (ui.tab === 'inv') await render();
+  const res = await fetchPrices(syms, key);
+  ui.pxBusy = false;
+  const now = Date.now();
+  const recs = Object.entries(res.prices).map(([symbol, price]) => ({ col: 'precios', id: 'px-' + symbol, symbol, price, asOf: now, source: 'api', deleted: false }));
+  const problems = [];
+  if (res.fatal) problems.push(res.fatal);
+  for (const [s2, e] of Object.entries(res.errors)) problems.push(`${s2}: ${e}.`);
+  if (res.skipped && res.skipped.length) problems.push(`Por el límite gratis no se consultaron: ${res.skipped.join(', ')}.`);
+  ui.pxMsg = problems.length ? `${recs.length ? `Actualizados ${recs.length}. ` : ''}${problems.join(' ')}` : '';
+  if (recs.length) await saveRecords(recs);
+  else await render();
+}
+
+function openPositionDetail(symbol) {
+  const d = ui.data;
+  const r = d && d.inv.rows.find((x) => x.symbol === symbol);
+  if (!r) { closeSheet(); return; }
+  const cur = r.currency;
+  const px = d.prices.get(symbol);
+  const ops = d.ops.filter((o) => o.symbol === symbol)
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || 0) - (a.createdAt || 0)));
+  const line = (a, b, cls) => h('div', { class: 'line' }, h('span', { text: a }), h('span', { class: cls || '', text: b }));
+  const err = h('p', { class: 'error', hidden: true });
+  async function savePrice(ev) {
+    ev.preventDefault();
+    const m = parsePrice(ev.target.elements.px.value, cur);
+    if (!m) { err.textContent = 'Escribe un precio mayor que cero.'; err.hidden = false; return; }
+    await saveRecord({ col: 'precios', id: 'px-' + symbol, symbol, price: m, asOf: Date.now(), source: 'manual', deleted: false });
+    openPositionDetail(symbol);
+  }
+  openSheet(h('div', { class: 'form' },
+    h('h3', { text: symbol }),
+    h('div', { class: 'card' },
+      r.open && line('Acciones', fmtQty(r.qty)),
+      r.open && line('Costo total', formatMoney(r.cost, cur)),
+      r.open && line('Costo promedio', formatMoney(Math.round(r.avgCost), cur)),
+      r.open && line('Valor actual', formatMoney(r.value, cur) + (r.hasPrice ? '' : ' (a costo)')),
+      r.open && r.hasPrice && line('Ganancia sin vender', gainText(r.unrealized, r.pct, cur), toneOf(r.unrealized)),
+      line('Ganancia realizada', signedMoney(r.realized, cur), toneOf(r.realized)),
+      r.dividends > 0 && line('Dividendos', formatMoney(r.dividends, cur))),
+    h('form', { class: 'form', onsubmit: savePrice },
+      h('label', {}, `Precio actual por acción (${cur})`,
+        h('input', { type: 'text', name: 'px', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 200,99', value: px ? toInput(Math.round(px.price), cur) : '' })),
+      px && h('p', { class: 'hint', style: 'margin:0', text: `${px.source === 'api' ? 'Traído automáticamente' : 'Escrito a mano'} ${timeAgo(px.asOf)}.` }),
+      err,
+      h('button', { class: 'btn', type: 'submit', text: 'Guardar precio' })),
+    h('div', { class: 'row wrap' },
+      h('button', { class: 'btn primary', type: 'button', text: 'Comprar', onclick: () => openInvForm(null, { symbol, kind: 'compra' }) }),
+      r.open && h('button', { class: 'btn', type: 'button', text: 'Vender', onclick: () => openInvForm(null, { symbol, kind: 'venta' }) }),
+      h('button', { class: 'btn', type: 'button', text: 'Dividendo', onclick: () => openInvForm(null, { symbol, kind: 'dividendo' }) })),
+    h('div', { class: 'section-title', text: 'Operaciones' }),
+    h('div', { class: 'list' }, ops.map((o) =>
+      h('button', { type: 'button', class: 'item', onclick: () => openInvForm(o) },
+        h('div', { class: 'main' },
+          h('div', { class: 'title', text: `${o.kind === 'compra' ? 'Compra' : o.kind === 'venta' ? 'Venta' : 'Dividendo'}${o.kind === 'dividendo' ? '' : ' · ' + fmtQty(o.qty) + ' acc.'}` }),
+          h('div', { class: 'sub', text: [shortDate(o.date), o.price ? `a ${formatMoney(o.price, cur)}` : null, o.note].filter(Boolean).join(' · ') })),
+        h('div', { class: 'amt ' + (o.kind === 'compra' ? 'neg' : 'pos'), text: (o.kind === 'compra' ? '−' : '+') + formatMoney(o.amount, cur) })))),
+    h('div', { class: 'row end' }, h('button', { class: 'btn', type: 'button', text: 'Cerrar', onclick: closeSheet }))));
+}
+
+async function openInvForm(existing, preset = {}) {
+  const d = ui.data;
+  if (!d) return;
+  const lastAcc = await store.getMeta('lastInvAccount');
+  const symbols = [...new Set(d.ops.map((o) => o.symbol))].sort();
+  const base = existing
+    ? {
+        kind: existing.kind, symbol: existing.symbol, date: existing.date, currency: existing.currency,
+        qty: existing.kind === 'dividendo' ? '' : fmtQty(existing.qty).replace(/\./g, '').replace(',', '.'),
+        price: existing.price ? toInput(existing.price, existing.currency) : '',
+        fee: existing.fee ? toInput(existing.fee, existing.currency) : '',
+        total: toInput(existing.amount, existing.currency), accountId: existing.accountId || '', note: existing.note || '',
+        touched: true,
+      }
+    : {
+        kind: preset.kind || 'compra', symbol: preset.symbol || '', date: todayStr(), currency: 'USD', qty: '', price: '', fee: '',
+        total: '', accountId: '', note: '', touched: false,
+      };
+  const s = base;
+  if (!existing && !preset.symbol && lastAcc) s.accountId = lastAcc;
+  const body = h('div');
+  const err = h('p', { class: 'error', hidden: true });
+  const fail = (m) => { err.textContent = m; err.hidden = false; };
+  const lockedCur = () => {
+    const r = d.inv.rows.find((x) => x.symbol === normSymbol(s.symbol));
+    return r ? r.currency : null;
+  };
+  const read = () => {
+    const f = body.querySelector('form');
+    if (!f) return;
+    for (const k of ['kind', 'symbol', 'date', 'currency', 'qty', 'price', 'fee', 'total', 'accountId', 'note']) if (f.elements[k]) s[k] = f.elements[k].value;
+  };
+  const rebuild = () => { read(); const l = lockedCur(); if (l) s.currency = l; build(); };
+
+  function autoTotal(f) {
+    if (s.touched) return;
+    const cur = f.elements.currency.value;
+    const q = parseQty(f.elements.qty.value);
+    const px = parsePrice(f.elements.price.value, cur);
+    if (!q || !px) return;
+    const fee = f.elements.fee.value.trim() ? parseAmount(f.elements.fee.value, cur) || 0 : 0;
+    const gross = Math.round(q * px);
+    f.elements.total.value = toInput(f.elements.kind.value === 'compra' ? gross + fee : Math.max(0, gross - fee), cur);
+  }
+
+  async function submit(ev) {
+    ev.preventDefault();
+    read();
+    const symbol = normSymbol(s.symbol);
+    const cur = s.currency;
+    const kind = s.kind;
+    if (!symbol) return fail('Escribe el símbolo (por ejemplo VOO).');
+    if (!s.date) return fail('Elige la fecha.');
+    const locked = lockedCur();
+    if (locked && locked !== cur) return fail(`${symbol} ya está registrado en ${locked}.`);
+    let qty = 0;
+    let price = null;
+    let fee = 0;
+    if (kind !== 'dividendo') {
+      qty = parseQty(s.qty);
+      if (!qty || qty <= 0) return fail('Escribe la cantidad de acciones (admite fracciones, como 0,0153).');
+      if (s.price.trim()) price = parsePrice(s.price, cur);
+      if (s.price.trim() && !price) return fail('Revisa el precio por acción.');
+      if (s.fee.trim()) { fee = parseAmount(s.fee, cur); if (fee === null || fee < 0) return fail('Revisa la comisión.'); }
+    }
+    let amount = s.total.trim() ? parseAmount(s.total, cur) : null;
+    if (!amount && price && qty) {
+      const gross = Math.round(qty * price);
+      amount = kind === 'compra' ? gross + fee : Math.max(0, gross - fee);
+    }
+    if (!amount || amount <= 0) return fail(kind === 'dividendo' ? 'Escribe el monto recibido.' : 'Escribe el precio por acción o el total.');
+    if (kind !== 'dividendo' && !price) price = Math.round(amount / qty);
+    const rec = {
+      ...(existing || {}), col: 'inv', id: existing ? existing.id : crypto.randomUUID(),
+      symbol, kind, date: s.date, qty, amount, price, fee, currency: cur, accountId: s.accountId,
+      note: s.note.trim(), deleted: false, createdAt: existing ? existing.createdAt : Date.now(),
+    };
+    const rest = d.ops.filter((o) => !existing || o.id !== existing.id);
+    const short = firstOversold([...rest, rec]);
+    if (short) return fail(`Con esto venderías más acciones de ${short} de las que tenías en esa fecha. Revisa la cantidad o la fecha.`);
+    if (s.accountId) await store.setMeta('lastInvAccount', s.accountId);
+    closeSheet();
+    await saveRecord(rec);
+  }
+
+  function build() {
+    err.hidden = true;
+    const cur = s.currency;
+    const div = s.kind === 'dividendo';
+    const accs = d.accounts.filter((a) => a.currency === cur && (!a.archived || a.id === s.accountId));
+    if (s.accountId && !accs.some((a) => a.id === s.accountId)) s.accountId = '';
+    const locked = lockedCur();
+    const form = h('form', { class: 'form', onsubmit: submit, oninput: (e) => {
+      if (e.target.name === 'total') { s.touched = e.target.value.trim() !== ''; return; }
+      if (['qty', 'price', 'fee'].includes(e.target.name)) autoTotal(form);
+    } },
+      h('h3', { text: existing ? 'Editar operación' : 'Nueva operación' }),
+      h('label', {}, 'Tipo',
+        h('select', { name: 'kind', onchange: rebuild },
+          opt('compra', 'Compra', s.kind === 'compra'), opt('venta', 'Venta', s.kind === 'venta'), opt('dividendo', 'Dividendo', s.kind === 'dividendo'))),
+      h('label', {}, 'Símbolo',
+        h('input', { type: 'text', name: 'symbol', list: 'inv-symbols', autocapitalize: 'characters', spellcheck: 'false', autocomplete: 'off', placeholder: 'VOO, VXUS, NVDA…', value: s.symbol, onchange: rebuild }),
+        h('datalist', { id: 'inv-symbols' }, symbols.map((x) => h('option', { value: x })))),
+      h('label', {}, 'Fecha', h('input', { type: 'date', name: 'date', value: s.date, required: true })),
+      h('label', {}, 'Moneda',
+        h('select', { name: 'currency', disabled: !!locked, onchange: rebuild },
+          Object.keys(CURRENCIES).map((c) => opt(c, c, c === cur)))),
+      !div && h('label', {}, 'Cantidad de acciones',
+        h('input', { type: 'text', name: 'qty', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 0,0153', value: s.qty })),
+      !div && h('label', {}, `Precio por acción (${cur})`,
+        h('input', { type: 'text', name: 'price', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 200,99', value: s.price })),
+      !div && h('label', {}, `Comisión (${cur}, opcional)`,
+        h('input', { type: 'text', name: 'fee', inputmode: 'decimal', autocomplete: 'off', placeholder: '0', value: s.fee })),
+      h('label', {}, div ? `Monto recibido (${cur})` : s.kind === 'compra' ? `Total pagado (${cur})` : `Total recibido (${cur})`,
+        h('input', { class: 'money', type: 'text', name: 'total', inputmode: 'decimal', autocomplete: 'off', value: s.total })),
+      !div && h('p', { class: 'hint', style: 'margin:0', text: 'El total se calcula solo con cantidad y precio; si tu bróker te dio otro total exacto, escríbelo y se usa ese.' }),
+      h('label', {}, s.kind === 'compra' ? 'Cuenta de donde sale el dinero' : 'Cuenta donde entra el dinero',
+        h('select', { name: 'accountId' },
+          opt('', 'No afecta ninguna cuenta (ya la tenía)', !s.accountId),
+          accs.map((a) => opt(a.id, a.name, a.id === s.accountId)))),
+      h('label', {}, 'Nota (opcional)', h('input', { type: 'text', name: 'note', autocomplete: 'off', value: s.note })),
+      err,
+      h('div', { class: 'row between wrap' },
+        existing ? h('button', { class: 'btn danger', type: 'button', text: 'Eliminar', onclick: async () => {
+          if (!confirm('¿Eliminar esta operación?')) return;
+          const short = firstOversold(d.ops.filter((o) => o.id !== existing.id));
+          if (short) return fail(`No se puede: hay ventas posteriores de ${short} que dependen de esta compra.`);
+          closeSheet();
+          await saveRecord({ ...existing, deleted: true });
+        } }) : h('span'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
+          h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }))));
+    body.replaceChildren(form);
+  }
+  const l0 = lockedCur();
+  if (l0) s.currency = l0;
+  build();
+  openSheet(body);
 }
 
 // ---------- Reportes ----------
@@ -690,7 +1022,7 @@ function renderReportes(d) {
     const yr = savingsYear(acc.id, d.movs, year);
     const savedYear = sumBy(yr, (x) => x.aportes);
     const card = h('div', { class: 'chart-card' },
-      h('h3', { text: `Ahorro por mes · ${acc.name}` }),
+      h('h3', { text: `Ahorro por mes · ${goalName(g, acc)}` }),
       h('p', { class: 'hint', text: `${year}: llevas ${formatMoney(savedYear, cur)} de ${formatMoney(annual, cur)} · meta mensual ${formatMoney(monthly, cur)}` }));
     if (yr.every((x) => x.aportes === 0 && x.rendimientos === 0)) {
       card.append(h('p', { class: 'hint', text: `Todavía no hay aportes en ${year}. Usa "＋ Aportar" en el Resumen para registrar el primero.` }));
@@ -703,9 +1035,9 @@ function renderReportes(d) {
   }
 
   // --- Patrimonio neto ---
-  const pts = netWorthPoints(d.accounts, d.movs, d.flows, d.debts, d.abonos, cur, todayStr(), 6);
+  const pts = netWorthPoints(d.accounts, d.movs, d.flows, d.debts, d.abonos, cur, todayStr(), 6, d.ops);
   const nwCard = h('div', { class: 'chart-card' }, h('h3', { text: 'Patrimonio neto' }),
-    h('p', { class: 'hint', text: 'Cuentas + lo que te deben − tarjetas y deudas, al cierre de cada mes' }));
+    h('p', { class: 'hint', text: 'Cuentas + lo que te deben − tarjetas y deudas' + (d.ops.length ? ' + inversiones (a costo)' : '') + ', al cierre de cada mes' }));
   if (pts.length < 2) {
     nwCard.append(h('p', { class: 'hint', text: pts.length ? `Hoy: ${formatMoney(pts[0].value, cur)}. La línea aparece cuando haya al menos dos fechas con datos.` : 'Aún no hay datos para esta moneda.' }));
   } else {
@@ -1409,7 +1741,12 @@ function fillCfgForm() {
   $('#cfg-branch').value = c.branch || '';
   $('#cfg-path').value = c.path || '';
   $('#cfg-token').value = c.token || '';
+  fillPxState();
   $('#device-info').textContent = `ID del dispositivo: ${deviceId} · Versión ${VERSION}`;
+}
+
+function fillPxState() {
+  $('#px-key').placeholder = getPxKey() ? 'Clave guardada en este dispositivo (escribe otra para cambiarla)' : 'Pega aquí tu clave';
 }
 
 function download(name, text) {
@@ -1426,7 +1763,19 @@ function download(name, text) {
 function bindUi() {
   document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
   $('#btn-sync').addEventListener('click', () => doSync(true));
-  $('#fab').addEventListener('click', () => (ui.tab === 'deudas' ? openDebtForm() : openMovForm()));
+  $('#fab').addEventListener('click', () => (ui.tab === 'deudas' ? openDebtForm() : ui.tab === 'inv' ? openInvForm() : openMovForm()));
+  $('#btn-settings').addEventListener('click', () => showTab(ui.tab === 'ajustes' ? 'resumen' : 'ajustes'));
+  $('#px-form').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const k = $('#px-key').value.trim();
+    try { if (k) localStorage.setItem(PX_KEY, k); else localStorage.removeItem(PX_KEY); } catch { /* sin almacenamiento */ }
+    $('#px-key').value = '';
+    fillPxState();
+  });
+  $('#px-clear').addEventListener('click', () => {
+    try { localStorage.removeItem(PX_KEY); } catch { /* sin almacenamiento */ }
+    fillPxState();
+  });
   $('#btn-add-cat').addEventListener('click', () => openCatForm());
 
   $('#cfg-form').addEventListener('submit', async (ev) => {

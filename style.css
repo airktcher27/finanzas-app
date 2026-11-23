@@ -206,3 +206,15 @@ svg [tabindex]:focus-visible { outline: 2px solid var(--accent); }
 .tbl th, .tbl td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
 .tbl th { color: var(--muted); font-weight: 600; }
 .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Ajustes en el encabezado */
+.top .row { gap: 6px; }
+.btn.icon { padding: 8px 12px; font-size: 1.1rem; line-height: 1; }
+.btn.icon.active { border-color: var(--accent); }
+/* Inversiones */
+.item .amt small.pos { color: var(--ok); }
+.item .amt small.neg { color: var(--danger); }
+.pxbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 4px 0 10px; }
+.pxbar .hint { margin: 0; }
+.line .pos { color: var(--ok); }
+.line .neg { color: var(--danger); }

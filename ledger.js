@@ -2,6 +2,8 @@
 // Los saldos NO se guardan: se calculan = saldo inicial + movimientos.
 // Así dos dispositivos nunca se pisan un número.
 
+import { holdingsCostAt } from './invest.js';
+
 export const live = (recs, col) => recs.filter((r) => r.col === col && !r.deleted);
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -64,7 +66,8 @@ export function monthTotals(movs, accById, month, accountId) {
 
 // Por moneda: disponible (cuentas normales), tarjetas (saldo de crédito, negativo = deuda),
 // lo que te deben (toMe), lo que debes en préstamos (iOwe) y el neto de todo.
-export function netSummary(accounts, balances, debtTot = {}) {
+// `inv`: valor de las inversiones por moneda ({ USD: { value } }); se suma al neto.
+export function netSummary(accounts, balances, debtTot = {}, inv = {}) {
   const out = {};
   const slot = (cur) => (out[cur] ||= { assets: 0, cards: 0, toMe: 0, iOwe: 0, net: 0 });
   for (const a of accounts) {
@@ -80,6 +83,12 @@ export function netSummary(accounts, balances, debtTot = {}) {
     t.toMe = d.toMe;
     t.iOwe = d.iOwe;
     t.net += d.toMe - d.iOwe;
+  }
+  for (const [cur, v] of Object.entries(inv)) {
+    if (!v.value) continue;
+    const t = slot(cur);
+    t.inv = v.value;
+    t.net += v.value;
   }
   return out;
 }
@@ -245,8 +254,9 @@ export function monthSeries(movs, accById, months, currency) {
 }
 
 // Fecha más antigua con datos (para no dibujar meses vacíos antes de que empieces a usar la app).
-export function earliestDate(accounts, movs, flows, debts) {
+export function earliestDate(accounts, movs, flows, debts, invOps = []) {
   const dates = [];
+  for (const o of invOps) dates.push(o.date);
   for (const m of movs) dates.push(m.date);
   for (const f of flows) dates.push(f.date);
   for (const d of debts) dates.push(d.date);
@@ -265,7 +275,8 @@ function accountStartDate(a, movs, flows) {
 }
 
 // Patrimonio neto por moneda al final de `date`: cuentas (incluye tarjetas) + te deben − debes.
-export function netWorthAt(accounts, movs, flows, debts, abonos, date) {
+// invOps: operaciones de inversión; se cuentan a costo (no hay precios históricos).
+export function netWorthAt(accounts, movs, flows, debts, abonos, date, invOps = []) {
   const out = {};
   const bal = accountBalances(
     accounts,
@@ -286,6 +297,7 @@ export function netWorthAt(accounts, movs, flows, debts, abonos, date) {
     if (rem <= 0) continue;
     out[d.currency] = (out[d.currency] || 0) + (d.dir === 'debo' ? -rem : rem);
   }
+  for (const [cur, cost] of Object.entries(holdingsCostAt(invOps, date))) out[cur] = (out[cur] || 0) + cost;
   return out;
 }
 
@@ -315,8 +327,8 @@ export function niceTicks(min, max, count = 4) {
 
 // Puntos del gráfico de patrimonio: fin de cada mes (hasta `maxMonths`) y hoy.
 // Si el historial es corto, el primer punto es el día del primer dato.
-export function netWorthPoints(accounts, movs, flows, debts, abonos, currency, today, maxMonths = 6) {
-  const first = earliestDate(accounts, movs, flows, debts);
+export function netWorthPoints(accounts, movs, flows, debts, abonos, currency, today, maxMonths = 6, invOps = []) {
+  const first = earliestDate(accounts, movs, flows, debts, invOps);
   if (!first) return [];
   const curMonth = monthOf(today);
   const minMonth = shiftMonth(curMonth, -(maxMonths - 1));
@@ -327,7 +339,7 @@ export function netWorthPoints(accounts, movs, flows, debts, abonos, currency, t
   if (monthOf(first) >= minMonth && first < dates[0].date) dates.unshift({ date: first, month: monthOf(first), first: true });
   const pts = [];
   for (const p of dates) {
-    const v = netWorthAt(accounts, movs, flows, debts, abonos, p.date)[currency];
+    const v = netWorthAt(accounts, movs, flows, debts, abonos, p.date, invOps)[currency];
     if (v !== undefined) pts.push({ ...p, value: v });
   }
   return pts;

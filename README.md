@@ -1,4 +1,4 @@
-# Finanzas personales (Fase 0)
+# Finanzas personales
 
 App web instalable (PWA) que guarda tus datos en el dispositivo y los sincroniza entre PC y celular mediante **un archivo cifrado en un repositorio privado de GitHub**. No hay servidor propio ni nada encendido 24/7.
 
@@ -135,7 +135,23 @@ Cómo se cuenta:
 
 Si empiezas a ahorrar a mitad de año, pon una meta anual acorde a los meses que quedan; si no, la app te avisará con ⚠ que no alcanzas con tu meta mensual.
 
+## Fase 4: inversiones
+
+Pestaña **Inversiones** para acciones y ETF (VOO, VXUS, NVDA, META, NU…). **Ajustes** pasó al botón ⚙ del encabezado.
+
+- **Operaciones:** compra, venta y dividendo (＋). La cantidad admite fracciones (`0,0153`). El total se calcula con cantidad × precio (+/− comisión); si tu bróker te da otro total exacto, escríbelo y se usa ese.
+- **Lo que ya tienes:** regístralo como una compra con fecha aproximada y deja la cuenta en *No afecta ninguna cuenta*. Si eliges una cuenta (por ejemplo Hapi), la compra resta de su saldo y la venta o el dividendo suman.
+- **Costo promedio:** al vender se retira del costo la parte proporcional; la diferencia es la *ganancia realizada*. La *ganancia sin vender* es valor actual − costo. Dividendos aparte.
+- **Ojo con no contar doble:** el saldo de una cuenta de inversión (Hapi) debe ser solo el efectivo; las acciones se cuentan aquí. En el **Resumen** el neto en USD suma las inversiones a su valor actual. En el gráfico de patrimonio de Reportes se suman **a costo** (no hay precios históricos).
+- **Precios:** a mano (toca la posición → *Precio actual*) o automáticos con una clave gratis de [Twelve Data](https://twelvedata.com) (Ajustes → Precios de inversiones). La clave se guarda solo en el dispositivo. El plan gratis permite 8 consultas por minuto; la app pide todos los símbolos en una sola y consulta al entrar a la pestaña (máx. cada 10 min) o con *Actualizar precios*. Si falla (sin clave, límite, sin conexión o el navegador bloquea la consulta) se avisa y queda el último precio. Sin precio, la posición se valora a costo.
+- Los precios y operaciones se sincronizan cifrados como lo demás.
+
+## Metas de ahorro con nombre
+
+Al crear o editar una meta puedes ponerle un nombre (ej. "Fondo de emergencia"); si lo dejas vacío se usa el de la cuenta.
+
 ## Pruebas
 
 - `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos y respaldo).
+- `node test-invest.mjs`: posiciones, costo promedio, fracciones, ventas sin respaldo, patrimonio y lectura de respuestas de precios.
 - `node test-ledger.mjs`: lectura de montos (`12.500`, `1,234.56`…), saldos, totales del mes, filtros y resumen.
