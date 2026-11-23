@@ -98,6 +98,10 @@ Pestaña **Deudas** para lo que te deben (*Me deben*) y lo que debes a personas 
 - **Movimientos** también lista los préstamos y abonos que tocan una cuenta, para que cada cambio de saldo tenga explicación. No cuentan como ingreso ni gasto del mes.
 - Al **eliminar una deuda** se borran sus abonos y se revierte su efecto en las cuentas.
 
+### Deudas por persona
+
+Arriba de las listas, la sección **Por persona** muestra una tarjeta por cada persona con lo que queda pendiente: *Te debe* o *Le debes* (el neto, por moneda). Si con la misma persona hay deudas en los dos sentidos, también ves el detalle. Los nombres iguales se agrupan sin importar mayúsculas, tildes o espacios ("Juan", " juan "). Las deudas saldadas no cuentan. Toca una tarjeta para ver solo las deudas de esa persona y vuelve a tocarla (o *Quitar filtro*) para ver todas.
+
 ### Corte y pago de tarjetas
 
 En una tarjeta de crédito (editar cuenta) puedes poner el **día de corte** y el **día límite de pago**. Con eso:

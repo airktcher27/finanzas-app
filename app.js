@@ -5,7 +5,7 @@ import { SyncError } from './errors.js';
 import { parseAmount, formatMoney, toInput, dec, CURRENCIES } from './money.js';
 import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
-  debtFlows, debtRemaining, debtIsDone, debtTotals, addDays, cardCycle,
+  debtFlows, debtRemaining, debtIsDone, debtTotals, debtsByPerson, personKey, addDays, cardCycle,
   categoryTotals, lastMonths, monthSeries, netWorthPoints, budgetState,
   savingsMonth, savingsYear, goalTargets, yearNeeded,
 } from './ledger.js';
@@ -23,7 +23,7 @@ let store;
 let deviceId;
 let syncing = false;
 let syncTimer = null;
-const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP', pxMsg: '', pxBusy: false, lastPxTry: 0, fxMsg: '', fxBusy: false, lastFxTry: 0 };
+const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP', debtPerson: '', pxMsg: '', pxBusy: false, lastPxTry: 0, fxMsg: '', fxBusy: false, lastFxTry: 0 };
 
 // ---------- Ayudantes de DOM ----------
 function h(tag, props, ...kids) {
@@ -1375,6 +1375,18 @@ function debtRow(x, d) {
       !done && x.dueDate && h('small', { class: overdue ? 'late' : '', text: (overdue ? 'Vencida ' : 'Vence ') + shortDate(x.dueDate) })));
 }
 
+// Tarjeta con lo pendiente de una persona (por moneda). Al tocarla filtra las listas de abajo.
+function personCard(p) {
+  const on = ui.debtPerson === p.key;
+  return h('button', { type: 'button', class: 'card person' + (on ? ' sel' : ''), 'aria-pressed': String(on),
+    onclick: () => { ui.debtPerson = on ? '' : p.key; render(); } },
+    h('div', { class: 'cur', text: p.person }),
+    Object.entries(p.byCur).map(([cur, c]) => h('div', { class: 'pc' },
+      h('div', { class: 'pc-main ' + (c.net > 0 ? 'pos' : c.net < 0 ? 'neg' : ''),
+        text: (c.net > 0 ? 'Te debe ' : c.net < 0 ? 'Le debes ' : 'A mano ') + (c.net === 0 ? '' : formatMoney(Math.abs(c.net), cur)) }),
+      c.toMe > 0 && c.iOwe > 0 && h('div', { class: 'sub', text: `Te debe ${formatMoney(c.toMe, cur)} · le debes ${formatMoney(c.iOwe, cur)}` }))));
+}
+
 function renderDeudas(d) {
   const root = $('#deudas-body');
   root.replaceChildren();
@@ -1387,8 +1399,22 @@ function renderDeudas(d) {
   const parts = Object.entries(d.debtTot).map(([cur, t]) => `${cur}: te deben ${formatMoney(t.toMe, cur)} · debes ${formatMoney(t.iOwe, cur)}`);
   root.append(h('p', { class: 'totals', text: parts.join('   |   ') || 'No tienes deudas pendientes.' }));
 
-  const open = d.debts.filter((x) => !debtIsDone(x, d.abonos));
-  const done = d.debts.filter((x) => debtIsDone(x, d.abonos));
+  const people = debtsByPerson(d.debts, d.abonos);
+  if (ui.debtPerson && !people.some((p) => p.key === ui.debtPerson)) ui.debtPerson = '';
+  if (people.length) {
+    const box = collapsible('debt-people', 'Por persona', String(people.length));
+    box.body.append(h('div', { class: 'cards people' }, people.map(personCard)));
+    root.append(box.el);
+  }
+  const sel = ui.debtPerson;
+  if (sel) {
+    const p = people.find((q) => q.key === sel);
+    root.append(h('p', { class: 'hint' }, `Mostrando solo a ${p.person}. `,
+      h('button', { class: 'link-btn', type: 'button', text: 'Quitar filtro', onclick: () => { ui.debtPerson = ''; render(); } })));
+  }
+  const mine = (x) => !sel || personKey(x.person) === sel;
+  const open = d.debts.filter((x) => !debtIsDone(x, d.abonos) && mine(x));
+  const done = d.debts.filter((x) => debtIsDone(x, d.abonos) && mine(x));
   const byDue = (a, b) => (a.dueDate || '9999') < (b.dueDate || '9999') ? -1 : (a.dueDate || '9999') > (b.dueDate || '9999') ? 1 : (b.createdAt || 0) - (a.createdAt || 0);
   for (const [dir, label] of [['me-deben', 'Me deben'], ['debo', 'Debo']]) {
     const list = open.filter((x) => x.dir === dir).sort(byDue);

@@ -145,6 +145,26 @@ export function debtTotals(debts, abonos) {
   return out;
 }
 
+// Nombre normalizado para agrupar a la misma persona ("Juan", " juan ", "JUÁN").
+export const personKey = (name) => String(name || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ');
+
+// Pendiente por persona y moneda: { key, person, count, byCur: { COP: { toMe, iOwe, net } } }.
+// net > 0: te debe más de lo que le debes; net < 0: al revés. Solo deudas abiertas.
+export function debtsByPerson(debts, abonos) {
+  const map = new Map();
+  for (const d of debts) {
+    if (debtIsDone(d, abonos)) continue;
+    const key = personKey(d.person);
+    let p = map.get(key);
+    if (!p) { p = { key, person: String(d.person || '').trim() || 'Sin nombre', count: 0, byCur: {} }; map.set(key, p); }
+    const c = (p.byCur[d.currency] ||= { toMe: 0, iOwe: 0, net: 0 });
+    const rem = debtRemaining(d, abonos);
+    if (d.dir === 'debo') { c.iOwe += rem; c.net -= rem; } else { c.toMe += rem; c.net += rem; }
+    p.count += 1;
+  }
+  return [...map.values()].sort((a, b) => a.person.localeCompare(b.person, 'es'));
+}
+
 export function addDays(dateStr, n) {
   const [y, m, d] = dateStr.split('-').map(Number);
   return todayStr(new Date(y, m - 1, d + n));

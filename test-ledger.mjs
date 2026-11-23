@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseAmount, formatMoney, toInput } from './money.js';
-import { accountBalances, filterMovs, monthTotals, netSummary, shiftMonth, todayStr } from './ledger.js';
+import { debtsByPerson, personKey, accountBalances, filterMovs, monthTotals, netSummary, shiftMonth, todayStr } from './ledger.js';
 
 let n = 0;
 const ok = (s) => console.log(`  ok ${++n}. ${s}`);
@@ -309,5 +309,23 @@ assert.equal(yearNeeded(1000, 5000, '2026-06-01', false).perMonth, 0);
 // Diciembre ya cumplido: sin meses restantes, lo que falta queda tal cual
 assert.deepEqual(yearNeeded(1200000, 1000000, '2026-12-20', true), { left: 0, missing: 200000, perMonth: 200000 });
 ok('cuánto ahorrar al mes hasta diciembre para llegar a la meta anual');
+
+// --- deudas por persona ---
+assert.equal(personKey('  JUÁN  Pérez '), 'juan perez');
+const dd = [
+  { id: 'a', person: 'Juan', dir: 'me-deben', currency: 'COP', amount: 100000 },
+  { id: 'b', person: ' juan ', dir: 'debo', currency: 'COP', amount: 30000 },
+  { id: 'c', person: 'Ana', dir: 'me-deben', currency: 'USD', amount: 5000 },
+  { id: 'd', person: 'Ana', dir: 'me-deben', currency: 'COP', amount: 20000, closed: true },
+  { id: 'e', person: 'Luis', dir: 'debo', currency: 'COP', amount: 10000 },
+];
+const dab = [{ id: 'x', debtId: 'a', amount: 40000 }, { id: 'y', debtId: 'e', amount: 10000 }];
+const byP = debtsByPerson(dd, dab);
+assert.deepEqual(byP.map((q) => q.person), ['Ana', 'Juan']);
+const juan = byP.find((q) => q.key === 'juan');
+assert.deepEqual(juan.byCur.COP, { toMe: 60000, iOwe: 30000, net: 30000 });
+assert.equal(juan.count, 2);
+assert.deepEqual(byP.find((q) => q.key === 'ana').byCur, { USD: { toMe: 5000, iOwe: 0, net: 5000 } });
+ok('deudas por persona: agrupa nombres iguales, descuenta abonos, ignora saldadas y separa monedas');
 
 console.log(`\nTodas las pruebas pasaron (${n}).`);

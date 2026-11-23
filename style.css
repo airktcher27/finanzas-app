@@ -238,3 +238,13 @@ svg [tabindex]:focus-visible { outline: 2px solid var(--accent); }
 .link-btn { background: none; border: 0; color: var(--muted); font: inherit; font-size: .8rem; padding: 2px 4px; cursor: pointer; text-decoration: underline; }
 .card .row.between { align-items: baseline; }
 #view-prefs .check { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+
+/* Deudas por persona */
+.cards.people { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.card.person { text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.card.person.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card.person .pc { margin-top: 6px; }
+.card.person .pc-main { font-weight: 600; }
+.pc-main.pos { color: var(--ok); }
+.pc-main.neg { color: var(--danger); }
+.card.person .sub { color: var(--muted); font-size: .85rem; }
