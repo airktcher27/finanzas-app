@@ -40,12 +40,14 @@ export function computePositions(ops) {
   for (const op of sortOps(ops)) {
     let p = pos.get(op.symbol);
     if (!p) {
-      p = { symbol: op.symbol, currency: op.currency, qty: 0, cost: 0, realized: 0, dividends: 0, firstDate: op.date, oversold: false };
+      p = { symbol: op.symbol, currency: op.currency, qty: 0, cost: 0, realized: 0, dividends: 0, firstDate: op.date, oversold: false, lots: [] };
       pos.set(op.symbol, p);
     }
     if (op.kind === 'compra') {
       p.qty = roundQty(p.qty + op.qty);
       p.cost += op.amount;
+      // Lote en pesos (solo USD): lo pagado × TRM del día de la compra. Sin TRM → null.
+      p.lots.push({ date: op.date, usd: op.amount, cop: op.currency === 'USD' && op.fx > 0 ? (op.amount / 100) * op.fx : null, opId: op.id });
     } else if (op.kind === 'venta') {
       const q = Math.min(op.qty, p.qty);
       if (op.qty > p.qty + 1e-9) p.oversold = true;
@@ -53,9 +55,11 @@ export function computePositions(ops) {
       const proceeds = Math.round((op.amount * q) / op.qty);
       const removed = q >= p.qty - 1e-9 ? p.cost : Math.round((p.cost * q) / p.qty);
       p.realized += proceeds - removed;
+      const keep = p.cost > 0 ? 1 - removed / p.cost : 0;
+      for (const l of p.lots) { l.usd *= keep; if (l.cop !== null) l.cop *= keep; }
       p.qty = roundQty(p.qty - q);
       p.cost -= removed;
-      if (p.qty <= 0) { p.qty = 0; p.cost = 0; }
+      if (p.qty <= 0) { p.qty = 0; p.cost = 0; p.lots = []; }
     } else if (op.kind === 'dividendo') {
       p.dividends += op.amount;
     }
@@ -80,7 +84,32 @@ export function holdingsCostAt(ops, date) {
 
 // prices: Map símbolo → { price } con price = unidades menores por acción (puede traer decimales).
 // Sin precio, la posición se valora a costo (hasPrice = false).
-export function valuePositions(positions, prices) {
+const dayNum = (d) => { const [y, m, dd] = d.split('-').map(Number); return Date.UTC(y, m - 1, dd) / 864e5; };
+export const daysBetween = (a, b) => Math.max(0, dayNum(b) - dayNum(a));
+
+// En pesos (solo posiciones USD con TRM de cada compra y dólar de hoy):
+//   costCop  = lo pagado en pesos al dólar de cada compra
+//   adj      = ese costo ajustado por inflación hasta hoy (tasa anual compuesta por días)
+//   gain     = valor hoy en pesos − costCop · real = valor hoy en pesos − adj
+export function copView(lots, valueUsd, ctx) {
+  if (!(ctx && ctx.fxNow > 0)) return null;
+  if (lots.some((l) => l.cop === null)) return { missing: lots.filter((l) => l.cop === null).length };
+  const costCop = lots.reduce((a, l) => a + l.cop, 0);
+  const usd = lots.reduce((a, l) => a + l.usd, 0);
+  const valueCop = (valueUsd / 100) * ctx.fxNow;
+  const hasInfl = ctx.annual !== null && ctx.annual !== undefined && ctx.today;
+  const adj = hasInfl ? lots.reduce((a, l) => a + l.cop * (1 + ctx.annual) ** (daysBetween(l.date, ctx.today) / 365), 0) : null;
+  return {
+    missing: 0, valueCop, costCop, adj, gain: valueCop - costCop,
+    pct: costCop > 0 ? (valueCop - costCop) / costCop : null,
+    real: adj === null ? null : valueCop - adj,
+    pctReal: adj > 0 ? (valueCop - adj) / adj : null,
+    infl: adj === null || costCop <= 0 ? null : adj / costCop - 1,
+    fxAvg: usd > 0 ? costCop / (usd / 100) : null,
+  };
+}
+
+export function valuePositions(positions, prices, ctx = {}) {
   const rows = [];
   const totals = {};
   for (const p of positions.values()) {
@@ -96,9 +125,18 @@ export function valuePositions(positions, prices) {
     t.cost += p.cost;
     t.unrealized += unrealized;
     if (!hasPrice) t.missing += 1;
+    const cop = p.currency === 'USD' ? copView(p.lots, value, ctx) : null;
+    if (cop) {
+      if (cop.missing) t.copMissing = (t.copMissing || 0) + cop.missing;
+      else {
+        const c = (t.cop ||= { valueCop: 0, costCop: 0, adj: 0, hasAdj: true });
+        c.valueCop += cop.valueCop; c.costCop += cop.costCop;
+        if (cop.adj === null) c.hasAdj = false; else c.adj += cop.adj;
+      }
+    }
     rows.push({
       ...p, open: true, hasPrice, price: hasPrice ? px.price : null, priceAt: hasPrice ? px.asOf : null,
-      avgCost: p.cost / p.qty, value, unrealized, pct: p.cost > 0 ? unrealized / p.cost : null,
+      avgCost: p.cost / p.qty, value, unrealized, cop, pct: p.cost > 0 ? unrealized / p.cost : null,
     });
   }
   rows.sort((a, b) => (b.open - a.open) || b.value - a.value || a.symbol.localeCompare(b.symbol));

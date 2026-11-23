@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { normSymbol, parseQty, computePositions, firstOversold, holdingsCostAt, valuePositions, invFlows } from './invest.js';
-import { parsePrices, fetchPrices, MAX_PER_CALL } from './prices.js';
+import { parsePrices, fetchPrices, fetchTrm, MAX_PER_CALL } from './prices.js';
+import { copView, daysBetween } from './invest.js';
 import { netSummary, netWorthAt, netWorthPoints, accountBalances } from './ledger.js';
 
 let n = 0;
@@ -153,5 +154,49 @@ r = await fetchPrices(['VOO'], 'k', async () => ({ status: 502, json: async () =
 assert.match(r.fatal, /502/);
 assert.deepEqual((await fetchPrices([], 'k', fakeOk)).prices, {});
 ok('consulta: arma la URL, limita a 8, y maneja red caída o respuesta rota');
+
+// --- dólar e inflación ---
+assert.equal(daysBetween('2026-01-01', '2027-01-01'), 365);
+const usdOps = [
+  op({ symbol: 'VOO', kind: 'compra', date: '2025-11-22', qty: 1, amount: 10000, fx: 4000 }),   // US$100 a 4.000
+  op({ symbol: 'VOO', kind: 'compra', date: '2026-05-22', qty: 1, amount: 12000, fx: 4200 }),   // US$120 a 4.200
+];
+let up = computePositions(usdOps).get('VOO');
+assert.equal(up.lots.length, 2);
+let cv = copView(up.lots, 25000, { fxNow: 4100, annual: 0.05, today: '2026-11-22' });
+assert.equal(cv.costCop, 400000 + 504000);
+assert.equal(cv.valueCop, 250 * 4100);
+assert.equal(cv.gain, 1025000 - 904000);
+assert.ok(Math.abs(cv.fxAvg - 904000 / 220) < 1e-6);
+const adjExpected = 400000 * 1.05 ** (365 / 365) + 504000 * 1.05 ** (184 / 365);
+assert.ok(Math.abs(cv.adj - adjExpected) < 1e-6);
+assert.ok(Math.abs(cv.real - (1025000 - adjExpected)) < 1e-6);
+assert.ok(cv.real < cv.gain);
+ok('en pesos: costo al dólar de cada compra, ganancia nominal y ganancia real tras inflación');
+// el dólar baja: ganas en USD pero pierdes en pesos
+cv = copView(up.lots, 25000, { fxNow: 3500, annual: 0.05, today: '2026-11-22' });
+assert.ok(cv.gain < 0);
+ok('si el dólar baja, la ganancia en dólares puede ser pérdida en pesos');
+// venta parcial reduce los lotes en proporción
+const sold = computePositions([...usdOps, op({ symbol: 'VOO', kind: 'venta', date: '2026-06-01', qty: 1, amount: 11000, fx: 4100 })]).get('VOO');
+assert.ok(Math.abs(sold.lots.reduce((a, l) => a + l.usd, 0) - sold.cost) < 1e-6);
+assert.ok(Math.abs(sold.lots.reduce((a, l) => a + l.cop, 0) - 904000 / 2) < 1e-6);
+ok('al vender, los lotes en pesos bajan en la misma proporción que el costo');
+// sin TRM en alguna compra no se inventa nada
+const noFx = computePositions([op({ symbol: 'NU', kind: 'compra', date: '2026-01-01', qty: 1, amount: 1000 })]).get('NU');
+assert.equal(copView(noFx.lots, 1000, { fxNow: 4000, annual: 0.05, today: '2026-11-22' }).missing, 1);
+assert.equal(copView(up.lots, 1000, {}), null);
+assert.equal(copView(up.lots, 25000, { fxNow: 4100 }).real, null);
+const vp = valuePositions(computePositions([...usdOps, op({ symbol: 'NU', kind: 'compra', date: '2026-01-01', qty: 1, amount: 1000 })]), new Map(), { fxNow: 4100, annual: 0.05, today: '2026-11-22' });
+assert.equal(vp.totals.USD.copMissing, 1);
+assert.equal(vp.totals.USD.cop.costCop, 904000);
+ok('sin TRM en una compra se avisa y no entra en los totales en pesos');
+// TRM
+let trmUrl = '';
+assert.deepEqual(await fetchTrm('2026-11-10', async (u) => { trmUrl = u; return { json: async () => [{ valor: '3950.55', vigenciadesde: '2026-11-10T00:00:00.000' }] }; }), { rate: 3950.55 });
+assert.match(decodeURIComponent(trmUrl), /vigenciadesde<='2026-11-10T23:59:59.000'/);
+assert.ok((await fetchTrm('2026-11-10', async () => ({ json: async () => [] }))).error);
+assert.match((await fetchTrm('2026-11-10', async () => { throw new TypeError('x'); })).error, /a mano/);
+ok('TRM: arma la consulta por fecha y maneja vacío o red caída');
 
 console.log(`\nTodas las pruebas de inversiones pasaron (${n}).`);

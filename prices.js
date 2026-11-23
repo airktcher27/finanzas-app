@@ -65,3 +65,26 @@ export async function fetchPrices(symbols, apiKey, fetchImpl = fetch) {
     clearTimeout(timer);
   }
 }
+
+// TRM oficial (Superfinanciera, datos abiertos de Colombia): pesos por dólar vigente en `date`
+// (fin de semana y festivos usan la del último día hábil). Sin clave. Devuelve { rate } o { error }.
+export async function fetchTrm(date, fetchImpl = fetch) {
+  const q = new URLSearchParams({
+    $where: `vigenciadesde<='${date}T23:59:59.000'`,
+    $order: 'vigenciadesde DESC',
+    $limit: '1',
+  });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 10000);
+  try {
+    const res = await fetchImpl(`https://www.datos.gov.co/resource/32sa-8pi3.json?${q}`, { signal: ctl.signal });
+    const json = await res.json();
+    const rate = Array.isArray(json) && json[0] ? Number(json[0].valor) : NaN;
+    if (!(rate > 0)) return { error: 'No se encontró la TRM de esa fecha.' };
+    return { rate };
+  } catch (e) {
+    return { error: e && e.name === 'AbortError' ? 'La consulta de la TRM tardó demasiado.' : 'No se pudo consultar la TRM (sin conexión o bloqueada). Escríbela a mano.' };
+  } finally {
+    clearTimeout(timer);
+  }
+}

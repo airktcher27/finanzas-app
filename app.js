@@ -10,11 +10,11 @@ import {
   savingsMonth, savingsYear, goalTargets, yearNeeded,
 } from './ledger.js';
 import { normSymbol, parseQty, computePositions, firstOversold, valuePositions, invFlows } from './invest.js';
-import { fetchPrices } from './prices.js';
+import { fetchPrices, fetchTrm } from './prices.js';
 import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTip } from './charts.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.6.0 (Fase 4: inversiones)';
+const VERSION = '0.7.0 (Fase 4: inversiones, dólar e inflación)';
 const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
@@ -23,7 +23,7 @@ let store;
 let deviceId;
 let syncing = false;
 let syncTimer = null;
-const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP', pxMsg: '', pxBusy: false, lastPxTry: 0 };
+const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP', pxMsg: '', pxBusy: false, lastPxTry: 0, fxMsg: '', fxBusy: false, lastFxTry: 0 };
 
 // ---------- Ayudantes de DOM ----------
 function h(tag, props, ...kids) {
@@ -199,7 +199,11 @@ async function loadData() {
   const ops = live(all, 'inv');
   const prices = new Map(live(all, 'precios').map((r) => [r.symbol, r]));
   const flows = [...debtFlows(debts, abonos), ...invFlows(ops)];
-  const inv = valuePositions(computePositions(ops), prices);
+  const fx = prices.get('USDCOP') || null;
+  const infl = live(all, 'config').find((r) => r.id === 'inflacion') || null;
+  const inv = valuePositions(computePositions(ops), prices, {
+    fxNow: fx ? fx.price : 0, annual: infl && infl.annual !== null && infl.annual !== undefined ? infl.annual : null, today: todayStr(),
+  });
   const budgets = live(all, 'presupuestos');
   const goals = live(all, 'metas');
   const cycles = new Map();
@@ -217,6 +221,8 @@ async function loadData() {
     flows,
     ops,
     prices,
+    fx,
+    infl,
     inv,
     budgets,
     goals,
@@ -259,7 +265,10 @@ async function showTab(name) {
   ui.tab = name;
   await render();
   // Al entrar a Inversiones, si hay clave, actualiza precios (máx. una vez cada 10 min).
-  if (name === 'inv' && getPxKey() && Date.now() - ui.lastPxTry > 600000) refreshPrices(false);
+  if (name === 'inv') {
+    if (Date.now() - ui.lastFxTry > 600000) await refreshFx(false);
+    if (getPxKey() && Date.now() - ui.lastPxTry > 600000) await refreshPrices(false);
+  }
 }
 
 function accountRow(a, d) {
@@ -619,6 +628,145 @@ const parsePrice = (text, cur) => {
   return q ? Math.round(q * 10 ** dec(cur)) : null;
 };
 
+
+const fmtRate = (r) => `$ ${new Intl.NumberFormat('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(r)}`;
+const pctPlain = (x) => `${(x * 100).toFixed(1).replace('.', ',')}%`;
+// TRM escrita a mano: "3.950,50", "3950.5", "3.950" (un punto + 3 dígitos = miles).
+function parseRate(text) {
+  const t = String(text || '').trim().replace(/[^\d.,]/g, '');
+  if (!/\d/.test(t)) return null;
+  let v;
+  if (/^\d{1,3}([.,]\d{3})+$/.test(t)) v = Number(t.replace(/[.,]/g, ''));
+  else {
+    const last = Math.max(t.lastIndexOf('.'), t.lastIndexOf(','));
+    v = last < 0 ? Number(t) : Number(`${t.slice(0, last).replace(/[.,]/g, '')}.${t.slice(last + 1)}`);
+  }
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+// Ganancia en pesos y real (descontando inflación). c: { valueCop, costCop, adj|null }
+function copBlock(c, { fxAvg, onInfl } = {}) {
+  const gain = c.valueCop - c.costCop;
+  const pct = c.costCop > 0 ? gain / c.costCop : null;
+  const cop = (v) => formatMoney(Math.round(v), 'COP');
+  const line = (a, b, cls) => h('div', { class: 'line' }, h('span', { text: a }), h('span', { class: cls || '', text: b }));
+  const out = [
+    h('div', { class: 'cop-title', text: 'En pesos' }),
+    fxAvg && line('Dólar promedio de tus compras', fmtRate(fxAvg)),
+    line('Valor hoy', cop(c.valueCop)),
+    line('Lo que pagaste', cop(c.costCop)),
+    line('Ganancia en pesos', `${gain > 0 ? '▲ ' : gain < 0 ? '▼ ' : ''}${signedMoney(Math.round(gain), 'COP')}${pct === null ? '' : ` (${pctTxt(pct)})`}`, toneOf(gain)),
+  ];
+  if (c.adj === null) {
+    out.push(h('button', { class: 'btn', type: 'button', style: 'margin-top:6px', text: 'Definir inflación para ver la ganancia real', onclick: onInfl }));
+  } else {
+    const real = c.valueCop - c.adj;
+    const realPct = c.adj > 0 ? real / c.adj : null;
+    out.push(
+      line('Inflación del periodo (aprox.)', c.costCop > 0 ? pctPlain(c.adj / c.costCop - 1) : '—'),
+      line('Ganancia real (sin inflación)', `${real > 0 ? '▲ ' : real < 0 ? '▼ ' : ''}${signedMoney(Math.round(real), 'COP')}${realPct === null ? '' : ` (${pctTxt(realPct)})`}`, toneOf(real)),
+      h('p', { class: 'hint cop-verdict', style: 'margin:6px 0 0', text: real > 0 ? '✓ Estás ganando poder adquisitivo: tu plata crece más que la inflación.' : '⚠ Por ahora no le ganas a la inflación: en pesos reales vas en pérdida.' }));
+  }
+  return out;
+}
+
+async function refreshFx(manual) {
+  const d = ui.data;
+  if (!d || ui.fxBusy || !d.inv.rows.some((r) => r.currency === 'USD')) return;
+  ui.lastFxTry = Date.now();
+  ui.fxBusy = true;
+  const r = await fetchTrm(todayStr());
+  ui.fxBusy = false;
+  if (r.rate) {
+    ui.fxMsg = '';
+    const cur = d.fx;
+    const fresh = cur && cur.source === 'api' && cur.price === r.rate && Date.now() - cur.asOf < 6 * 3600e3;
+    if (!fresh) { await saveRecord({ col: 'precios', id: 'fx-USDCOP', symbol: 'USDCOP', price: r.rate, asOf: Date.now(), source: 'api', deleted: false }); return; }
+  } else ui.fxMsg = r.error;
+  if (ui.tab === 'inv') await render();
+}
+
+// Busca la TRM de cada compra en USD que no la tiene (una consulta por fecha distinta).
+async function fillMissingFx() {
+  const d = ui.data;
+  const todo = d.ops.filter((o) => o.kind === 'compra' && o.currency === 'USD' && !(o.fx > 0));
+  if (!todo.length || ui.fxBusy) return;
+  ui.fxBusy = true;
+  ui.fxMsg = `Buscando la TRM de ${todo.length} compra(s)…`;
+  await render();
+  const byDate = new Map();
+  const recs = [];
+  let failed = '';
+  for (const o of todo) {
+    if (!byDate.has(o.date)) byDate.set(o.date, await fetchTrm(o.date));
+    const r = byDate.get(o.date);
+    if (r.rate) recs.push({ ...o, fx: r.rate });
+    else { failed = r.error; if (/conexi|bloque/.test(r.error)) break; }
+  }
+  ui.fxBusy = false;
+  ui.fxMsg = failed ? `${recs.length ? `Completadas ${recs.length}. ` : ''}${failed}` : '';
+  if (recs.length) await saveRecords(recs);
+  else await render();
+}
+
+function openFxForm() {
+  const d = ui.data;
+  const err = h('p', { class: 'error', hidden: true });
+  openSheet(h('form', { class: 'form', onsubmit: async (ev) => {
+    ev.preventDefault();
+    const v = parseRate(ev.target.elements.fx.value);
+    if (!v) { err.textContent = 'Escribe cuántos pesos vale un dólar hoy.'; err.hidden = false; return; }
+    closeSheet();
+    await saveRecord({ col: 'precios', id: 'fx-USDCOP', symbol: 'USDCOP', price: v, asOf: Date.now(), source: 'manual', deleted: false });
+  } },
+    h('h3', { text: 'Dólar de hoy' }),
+    h('p', { class: 'hint', text: 'Normalmente se trae solo (TRM oficial). Escríbelo si no hay conexión o quieres usar otra tasa.' }),
+    h('label', {}, 'Pesos por dólar',
+      h('input', { type: 'text', name: 'fx', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 3.950,50', value: d.fx ? String(d.fx.price) : '' })),
+    err,
+    h('div', { class: 'row end' },
+      h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
+      h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }))));
+}
+
+function openInflForm() {
+  const d = ui.data;
+  const err = h('p', { class: 'error', hidden: true });
+  const cur = d.infl && d.infl.annual !== null && d.infl.annual !== undefined ? String((d.infl.annual * 100).toFixed(2)).replace(/\.?0+$/, '').replace('.', ',') : '';
+  openSheet(h('form', { class: 'form', onsubmit: async (ev) => {
+    ev.preventDefault();
+    const raw = ev.target.elements.pct.value.trim();
+    const v = raw ? parseQty(raw) : null;
+    if (raw && (v === null || v < 0 || v > 200)) { err.textContent = 'Escribe un porcentaje, por ejemplo 5,2.'; err.hidden = false; return; }
+    closeSheet();
+    await saveRecord({ col: 'config', id: 'inflacion', annual: raw ? v / 100 : null, deleted: false });
+  } },
+    h('h3', { text: 'Inflación anual' }),
+    h('p', { class: 'hint', text: 'Usa la inflación anual de Colombia (IPC) que publica el DANE; la app la aplica a cada compra según los días que lleva. Es una aproximación: la inflación real cambia mes a mes.' }),
+    h('label', {}, 'Inflación anual (%)',
+      h('input', { type: 'text', name: 'pct', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 5,2', value: cur })),
+    err,
+    h('div', { class: 'row end' },
+      h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
+      h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }))));
+}
+
+function fxInflCard(d) {
+  const ago = d.fx ? timeAgo(d.fx.asOf) : '';
+  return h('div', { class: 'chart-card' },
+    h('h3', { text: 'Dólar e inflación' }),
+    h('div', { class: 'list' },
+      h('button', { type: 'button', class: 'item', onclick: openFxForm },
+        h('div', { class: 'main' }, h('div', { class: 'title', text: 'Dólar hoy (TRM)' }),
+          h('div', { class: 'sub', text: d.fx ? `${d.fx.source === 'api' ? 'Oficial' : 'Escrito a mano'} · ${ago} · toca para corregir` : 'Sin dato · toca para escribirlo' })),
+        h('div', { class: 'amt', text: d.fx ? fmtRate(d.fx.price) : '—' })),
+      h('button', { type: 'button', class: 'item', onclick: openInflForm },
+        h('div', { class: 'main' }, h('div', { class: 'title', text: 'Inflación anual (aprox.)' }),
+          h('div', { class: 'sub', text: 'Se descuenta de tus ganancias en pesos' })),
+        h('div', { class: 'amt', text: d.infl && d.infl.annual !== null && d.infl.annual !== undefined ? pctPlain(d.infl.annual) : 'Definir' }))),
+    ui.fxMsg && h('p', { class: 'hint', style: 'margin:8px 0 0', text: ui.fxMsg }));
+}
+
 function positionRow(r) {
   const cur = r.currency;
   const price = r.hasPrice ? ` · Precio ${formatMoney(Math.round(r.price), cur)}` : ' · sin precio (a costo)';
@@ -647,7 +795,7 @@ function renderInv(d) {
   const latest = Math.max(0, ...open.filter((r) => r.hasPrice).map((r) => r.priceAt || 0));
   root.append(h('div', { class: 'pxbar' },
     h('p', { class: 'hint', text: ui.pxMsg || (latest ? `Precios de ${timeAgo(latest)}.` : 'Sin precios todavía: se valora al costo.') }),
-    h('button', { class: 'btn', type: 'button', text: '⟳ Actualizar precios', disabled: ui.pxBusy, onclick: () => refreshPrices(true) })));
+    h('button', { class: 'btn', type: 'button', text: '⟳ Actualizar precios', disabled: ui.pxBusy, onclick: async () => { await refreshFx(true); await refreshPrices(true); } })));
 
   const cards = h('div', { class: 'cards' });
   for (const [cur, t] of Object.entries(totals)) {
@@ -659,9 +807,15 @@ function renderInv(d) {
       h('div', { class: 'line' }, h('span', { text: 'Ganancia sin vender' }), h('span', { class: toneOf(t.unrealized), text: gainText(t.unrealized, pct, cur) })),
       t.realized !== 0 && h('div', { class: 'line' }, h('span', { text: 'Ganancia realizada' }), h('span', { class: toneOf(t.realized), text: signedMoney(t.realized, cur) })),
       t.dividends !== 0 && h('div', { class: 'line' }, h('span', { text: 'Dividendos' }), h('span', { text: formatMoney(t.dividends, cur) })),
-      t.missing > 0 && h('p', { class: 'hint', style: 'margin:6px 0 0', text: `${t.missing} posición(es) sin precio: se cuentan al costo.` })));
+      t.missing > 0 && h('p', { class: 'hint', style: 'margin:6px 0 0', text: `${t.missing} posición(es) sin precio: se cuentan al costo.` }),
+      cur === 'USD' && t.cop && copBlock({ valueCop: t.cop.valueCop, costCop: t.cop.costCop, adj: t.cop.hasAdj ? t.cop.adj : null }, { onInfl: openInflForm }),
+      cur === 'USD' && t.copMissing > 0 && h('div', {},
+        h('p', { class: 'hint', style: 'margin:8px 0 4px', text: `Faltan el dólar de ${t.copMissing} compra(s) para calcular tu ganancia en pesos.` }),
+        h('button', { class: 'btn', type: 'button', text: 'Buscar TRM faltantes', disabled: ui.fxBusy, onclick: fillMissingFx })),
+      cur === 'USD' && !d.fx && h('p', { class: 'hint', style: 'margin:8px 0 0', text: 'Sin el dólar de hoy no se puede calcular en pesos. Usa "Actualizar precios" o escríbelo abajo.' })));
   }
   root.append(cards);
+  if (totals.USD) root.append(fxInflCard(d));
 
   if (open.length) root.append(h('div', { class: 'section-title', text: 'Posiciones' }), h('div', { class: 'list' }, open.map(positionRow)));
 
@@ -748,6 +902,8 @@ function openPositionDetail(symbol) {
       r.open && r.hasPrice && line('Ganancia sin vender', gainText(r.unrealized, r.pct, cur), toneOf(r.unrealized)),
       line('Ganancia realizada', signedMoney(r.realized, cur), toneOf(r.realized)),
       r.dividends > 0 && line('Dividendos', formatMoney(r.dividends, cur))),
+    r.open && r.cop && !r.cop.missing && h('div', { class: 'card' }, copBlock({ valueCop: r.cop.valueCop, costCop: r.cop.costCop, adj: r.cop.adj }, { fxAvg: r.cop.fxAvg, onInfl: openInflForm })),
+    r.open && r.cop && r.cop.missing > 0 && h('p', { class: 'hint', text: `Faltan el dólar de ${r.cop.missing} compra(s) de esta posición. Ábrelas abajo y pon la TRM, o usa "Buscar TRM faltantes" en la pestaña.` }),
     h('form', { class: 'form', onsubmit: savePrice },
       h('label', {}, `Precio actual por acción (${cur})`,
         h('input', { type: 'text', name: 'px', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 200,99', value: px ? toInput(Math.round(px.price), cur) : '' })),
@@ -779,12 +935,12 @@ async function openInvForm(existing, preset = {}) {
         qty: existing.kind === 'dividendo' ? '' : fmtQty(existing.qty).replace(/\./g, '').replace(',', '.'),
         price: existing.price ? toInput(existing.price, existing.currency) : '',
         fee: existing.fee ? toInput(existing.fee, existing.currency) : '',
-        total: toInput(existing.amount, existing.currency), accountId: existing.accountId || '', note: existing.note || '',
+        fx: existing.fx ? String(existing.fx) : '', total: toInput(existing.amount, existing.currency), accountId: existing.accountId || '', note: existing.note || '',
         touched: true,
       }
     : {
         kind: preset.kind || 'compra', symbol: preset.symbol || '', date: todayStr(), currency: 'USD', qty: '', price: '', fee: '',
-        total: '', accountId: '', note: '', touched: false,
+        total: '', fx: '', fxHint: '', fxTouched: false, accountId: '', note: '', touched: false,
       };
   const s = base;
   if (!existing && !preset.symbol && lastAcc) s.accountId = lastAcc;
@@ -798,7 +954,7 @@ async function openInvForm(existing, preset = {}) {
   const read = () => {
     const f = body.querySelector('form');
     if (!f) return;
-    for (const k of ['kind', 'symbol', 'date', 'currency', 'qty', 'price', 'fee', 'total', 'accountId', 'note']) if (f.elements[k]) s[k] = f.elements[k].value;
+    for (const k of ['kind', 'symbol', 'date', 'currency', 'qty', 'price', 'fee', 'fx', 'total', 'accountId', 'note']) if (f.elements[k]) s[k] = f.elements[k].value;
   };
   const rebuild = () => { read(); const l = lockedCur(); if (l) s.currency = l; build(); };
 
@@ -833,6 +989,11 @@ async function openInvForm(existing, preset = {}) {
       if (s.price.trim() && !price) return fail('Revisa el precio por acción.');
       if (s.fee.trim()) { fee = parseAmount(s.fee, cur); if (fee === null || fee < 0) return fail('Revisa la comisión.'); }
     }
+    let fx = null;
+    if (kind === 'compra' && cur === 'USD' && s.fx.trim()) {
+      fx = parseRate(s.fx);
+      if (!fx) return fail('Revisa la TRM (pesos por dólar), por ejemplo 3.950,50.');
+    }
     let amount = s.total.trim() ? parseAmount(s.total, cur) : null;
     if (!amount && price && qty) {
       const gross = Math.round(qty * price);
@@ -842,7 +1003,7 @@ async function openInvForm(existing, preset = {}) {
     if (kind !== 'dividendo' && !price) price = Math.round(amount / qty);
     const rec = {
       ...(existing || {}), col: 'inv', id: existing ? existing.id : crypto.randomUUID(),
-      symbol, kind, date: s.date, qty, amount, price, fee, currency: cur, accountId: s.accountId,
+      symbol, kind, date: s.date, qty, amount, price, fee, fx, currency: cur, accountId: s.accountId,
       note: s.note.trim(), deleted: false, createdAt: existing ? existing.createdAt : Date.now(),
     };
     const rest = d.ops.filter((o) => !existing || o.id !== existing.id);
@@ -862,6 +1023,7 @@ async function openInvForm(existing, preset = {}) {
     const locked = lockedCur();
     const form = h('form', { class: 'form', onsubmit: submit, oninput: (e) => {
       if (e.target.name === 'total') { s.touched = e.target.value.trim() !== ''; return; }
+      if (e.target.name === 'fx') { s.fxTouched = e.target.value.trim() !== ''; return; }
       if (['qty', 'price', 'fee'].includes(e.target.name)) autoTotal(form);
     } },
       h('h3', { text: existing ? 'Editar operación' : 'Nueva operación' }),
@@ -871,10 +1033,13 @@ async function openInvForm(existing, preset = {}) {
       h('label', {}, 'Símbolo',
         h('input', { type: 'text', name: 'symbol', list: 'inv-symbols', autocapitalize: 'characters', spellcheck: 'false', autocomplete: 'off', placeholder: 'VOO, VXUS, NVDA…', value: s.symbol, onchange: rebuild }),
         h('datalist', { id: 'inv-symbols' }, symbols.map((x) => h('option', { value: x })))),
-      h('label', {}, 'Fecha', h('input', { type: 'date', name: 'date', value: s.date, required: true })),
+      h('label', {}, 'Fecha', h('input', { type: 'date', name: 'date', value: s.date, required: true, onchange: () => { read(); if (!s.fxTouched) { s.fx = ''; lookupFx(); } } })),
       h('label', {}, 'Moneda',
         h('select', { name: 'currency', disabled: !!locked, onchange: rebuild },
           Object.keys(CURRENCIES).map((c) => opt(c, c, c === cur)))),
+      cur === 'USD' && s.kind === 'compra' && h('label', {}, 'Dólar ese día (TRM, pesos por dólar)',
+        h('input', { type: 'text', name: 'fx', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 3.950,50', value: s.fx })),
+      cur === 'USD' && s.kind === 'compra' && h('p', { class: 'hint', id: 'fx-hint', style: 'margin:0', text: s.fxHint || 'Opcional: sirve para calcular tu ganancia en pesos y descontar la inflación.' }),
       !div && h('label', {}, 'Cantidad de acciones',
         h('input', { type: 'text', name: 'qty', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 0,0153', value: s.qty })),
       !div && h('label', {}, `Precio por acción (${cur})`,
@@ -902,6 +1067,24 @@ async function openInvForm(existing, preset = {}) {
           h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
           h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }))));
     body.replaceChildren(form);
+    if (cur === 'USD' && s.kind === 'compra' && !s.fx && !s.fxTouched && s.date) queueMicrotask(lookupFx);
+  }
+
+  let fxSeq = 0;
+  async function lookupFx() {
+    const f = body.querySelector('form');
+    if (!f || !f.elements.fx) return;
+    const my = ++fxSeq;
+    const hint = f.querySelector('#fx-hint');
+    if (hint) hint.textContent = 'Buscando la TRM oficial de esa fecha…';
+    const r = await fetchTrm(f.elements.date.value);
+    if (my !== fxSeq) return;
+    const f2 = body.querySelector('form');
+    if (!f2 || !f2.elements.fx) return;
+    s.fxHint = r.rate ? 'TRM oficial de esa fecha (datos.gov.co). Puedes corregirla.' : r.error;
+    if (r.rate && !s.fxTouched) { f2.elements.fx.value = String(r.rate); s.fx = String(r.rate); }
+    const h2 = f2.querySelector('#fx-hint');
+    if (h2) h2.textContent = s.fxHint;
   }
   const l0 = lockedCur();
   if (l0) s.currency = l0;

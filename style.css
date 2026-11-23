@@ -229,3 +229,6 @@ svg [tabindex]:focus-visible { outline: 2px solid var(--accent); }
 .coll-note { margin-left: auto; font-size: .8rem; text-transform: none; letter-spacing: 0; }
 .coll-body { padding-top: 6px; }
 .coll-body > :last-child { margin-bottom: 0; }
+
+/* Ganancia en pesos */
+.cop-title { font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--border); }

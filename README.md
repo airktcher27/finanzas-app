@@ -146,6 +146,17 @@ Pestaña **Inversiones** para acciones y ETF (VOO, VXUS, NVDA, META, NU…). **A
 - **Precios:** a mano (toca la posición → *Precio actual*) o automáticos con una clave gratis de [Twelve Data](https://twelvedata.com) (Ajustes → Precios de inversiones). La clave se guarda solo en el dispositivo. El plan gratis permite 8 consultas por minuto; la app pide todos los símbolos en una sola y consulta al entrar a la pestaña (máx. cada 10 min) o con *Actualizar precios*. Si falla (sin clave, límite, sin conexión o el navegador bloquea la consulta) se avisa y queda el último precio. Sin precio, la posición se valora a costo.
 - Los precios y operaciones se sincronizan cifrados como lo demás.
 
+### Dólar, ganancia en pesos e inflación
+
+Para saber si de verdad ganas, la app también calcula en pesos (solo posiciones en USD):
+
+- **Dólar de cada compra:** al registrar una compra en USD, el campo *Dólar ese día (TRM)* se llena solo con la TRM oficial de esa fecha (datos abiertos de la Superfinanciera, sin clave). Puedes corregirla a mano. Si no se pudo traer, usa **Buscar TRM faltantes** en la pestaña para completar las compras que no la tienen.
+- **Dólar de hoy:** se trae al entrar a Inversiones (o con *Actualizar precios*); toca la tarjeta *Dólar e inflación* para escribirlo a mano.
+- **Ganancia en pesos** = valor de hoy en pesos − lo que pagaste en pesos (cada compra al dólar de su día). Así ves el efecto del dólar: puedes ganar en dólares y perder en pesos, o al revés.
+- **Ganancia real:** descuenta la inflación. Defines **una tasa anual** (la del IPC que publica el DANE) y la app la aplica a cada compra por los días que lleva. Es una aproximación: no usa el IPC mes a mes. Si pones la inflación en 0, real = nominal.
+- La *ganancia realizada* (ventas) sigue en dólares.
+- Los lotes se reducen en proporción al vender, igual que el costo promedio.
+
 ## Metas de ahorro con nombre
 
 Al crear o editar una meta puedes ponerle un nombre (ej. "Fondo de emergencia"); si lo dejas vacío se usa el de la cuenta.
