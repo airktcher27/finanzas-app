@@ -11,6 +11,8 @@
   --ok: #067647;
   --s1: #2a78d6;
   --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
   --grid: #e1e0d9;
   --axis: #c3c2b7;
   --good-text: #006300;
@@ -32,6 +34,8 @@
     --ok: #47cd89;
     --s1: #3987e5;
     --s2: #d95926;
+    --s3: #199e70;
+    --s4: #c98500;
     --grid: #2c2c2a;
     --axis: #383835;
     --good-text: #0ca30c;
@@ -50,6 +54,8 @@
   --ok: #47cd89;
   --s1: #3987e5;
   --s2: #d95926;
+  --s3: #199e70;
+  --s4: #c98500;
   --grid: #2c2c2a;
   --axis: #383835;
   --good-text: #0ca30c;
@@ -313,3 +319,26 @@ svg [tabindex]:focus-visible { outline: 2px solid var(--accent); }
 .imp-sel select { padding: 7px 8px; font-size: .9rem; }
 .tag { font-size: .75rem; border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; color: var(--text); }
 .amt.neg { color: var(--danger); } .amt.pos { color: var(--ok); }
+
+/* Comparar con un índice */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.chip { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 999px; padding: 6px 12px; font: inherit; font-size: .85rem; cursor: pointer; }
+.chip.on { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
+.bench-verdict { font-weight: 600; margin: 4px 0 8px; }
+.bench-verdict.pos { color: var(--ok); } .bench-verdict.neg { color: var(--danger); }
+.bench-tbl { width: 100%; margin-bottom: 10px; }
+.bench-tbl tr.main td { font-weight: 700; }
+.bench-tbl td.pos { color: var(--ok); } .bench-tbl td.neg { color: var(--danger); }
+.bench-chart { margin-top: 6px; }
+/* Asignación */
+.alloc { display: grid; gap: 12px; }
+.alloc-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.alloc-track { position: relative; height: 12px; background: var(--grid); border-radius: 6px; margin: 4px 0 3px; }
+.alloc-fill { position: absolute; inset: 0 auto 0 0; background: var(--s1); border-radius: 6px; }
+.alloc-target { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--text); border-radius: 1px; }
+.alloc-note { font-size: .85rem; color: var(--muted); }
+.alloc-note.warn { color: var(--warn); }
+.alloc-edit .pct { display: flex; align-items: center; gap: 6px; }
+.alloc-edit .pct input { width: 80px; text-align: right; }
+.privado .bench-verdict, .privado .bench-tbl td.pos, .privado .bench-tbl td.neg { color: var(--text); }
+.warn-text { color: var(--warn); font-size: .9rem; margin: 0 0 8px; }

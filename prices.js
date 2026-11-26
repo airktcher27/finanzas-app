@@ -88,3 +88,53 @@ export async function fetchTrm(date, fetchImpl = fetch) {
     clearTimeout(timer);
   }
 }
+
+// Historial diario de cierres (time_series): 1 crédito por símbolo. Devuelve
+// { series: { SÍMBOLO: [[fecha, cierre en centavos], ...] (de la más vieja a la más nueva) }, errors, fatal }.
+export function parseSeries(json, symbols) {
+  const series = {};
+  const errors = {};
+  if (!json || typeof json !== 'object') return { series, errors, fatal: 'Respuesta inesperada del servicio de precios.' };
+  const msgOf = (j) => (j.code === 401 || j.code === 403 ? 'La clave de Twelve Data no es válida.'
+    : j.code === 429 ? 'Llegaste al límite gratuito de consultas; espera un minuto.' : j.message ? String(j.message) : 'Error del servicio de precios.');
+  if (json.status === 'error' && !symbols.some((s) => json[s])) {
+    // Con un solo símbolo, un error que no es de clave ni de límite es de ese símbolo.
+    if (symbols.length === 1 && ![401, 403, 429].includes(json.code)) return { series, errors: { [symbols[0]]: msgOf(json) }, fatal: null };
+    return { series, errors, fatal: msgOf(json) };
+  }
+  const one = (j) => (j.values || [])
+    .map((v) => [String(v.datetime).slice(0, 10), Math.round(Number(v.close) * 100 * 1e4) / 1e4])
+    .filter(([d, c]) => /^\d{4}-\d{2}-\d{2}$/.test(d) && c > 0)
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const get = (s) => (symbols.length === 1 && json.values ? json : json[s]);
+  for (const s of symbols) {
+    const j = get(s);
+    if (!j) { errors[s] = 'Sin respuesta'; continue; }
+    if (j.status === 'error') { errors[s] = msgOf(j); continue; }
+    const arr = one(j);
+    if (arr.length) series[s] = arr; else errors[s] = 'Sin datos';
+  }
+  return { series, errors, fatal: null };
+}
+
+export async function fetchSeries(symbols, startDate, apiKey, fetchImpl = fetch) {
+  const list = [...new Set(symbols)].filter(Boolean);
+  const batch = list.slice(0, MAX_PER_CALL);
+  const skipped = list.slice(MAX_PER_CALL);
+  if (!batch.length) return { series: {}, errors: {}, skipped, fatal: null };
+  const q = new URLSearchParams({ symbol: batch.join(','), interval: '1day', start_date: startDate, outputsize: '5000', apikey: apiKey });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000);
+  try {
+    const res = await fetchImpl(`https://api.twelvedata.com/time_series?${q}`, { signal: ctl.signal });
+    let json = null;
+    try { json = await res.json(); } catch { /* no es JSON */ }
+    if (!json) return { series: {}, errors: {}, skipped, fatal: `El servicio de precios respondió ${res.status}.` };
+    return { ...parseSeries(json, batch), skipped };
+  } catch (e) {
+    return { series: {}, errors: {}, skipped, network: true,
+      fatal: e && e.name === 'AbortError' ? 'El servicio de precios tardó demasiado.' : 'No se pudo consultar el historial de precios (sin conexión o bloqueado).' };
+  } finally {
+    clearTimeout(timer);
+  }
+}

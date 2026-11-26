@@ -332,3 +332,90 @@ export function columnsTarget(width, rows, cur, target, name, color) {
   g.append(s('text', { x: W - padR, y: y(target) - 5, 'text-anchor': 'end', class: 'end-label', 'pointer-events': 'none', text: `Meta ${compactMoney(target, cur)}` }));
   return g;
 }
+
+// ---------- Varias líneas en el tiempo (SVG) ----------
+// series: [{ name, color, points: [{ date, value|null, label, full }] }] todas con las mismas fechas.
+// Leyenda arriba (la arma quien llama) + nombre al final de cada línea, separados para no pisarse.
+export function multiLine(width, series, cur, name) {
+  const H = 230;
+  const padL = 64;
+  const padR = 78;
+  const padT = 16;
+  const padB = 26;
+  const W = Math.max(width, 280);
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const dates = series[0].points.map((p) => p);
+  const vals = series.flatMap((sr) => sr.points.map((p) => p.value)).filter((v) => v !== null);
+  const ticks = niceTicks(Math.min(...vals), Math.max(...vals), 4);
+  const lo = ticks[0];
+  const hi = ticks[ticks.length - 1];
+  const span = hi - lo || 1;
+  const toMs = (d) => { const [yy, mm, dd] = d.split('-').map(Number); return Date.UTC(yy, mm - 1, dd); };
+  const t0 = toMs(dates[0].date);
+  const t1 = toMs(dates[dates.length - 1].date);
+  const x = (d) => padL + (t1 === t0 ? plotW : ((toMs(d) - t0) / (t1 - t0)) * plotW);
+  const y = (v) => padT + plotH - ((v - lo) / span) * plotH;
+
+  const g = s('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', height: H, role: 'img', 'aria-label': name });
+  for (const t of ticks) {
+    g.append(s('line', { x1: padL, x2: padL + plotW, y1: y(t), y2: y(t), stroke: 'var(--grid)', 'stroke-width': 1 }));
+    g.append(s('text', { x: padL - 6, y: y(t) + 4, 'text-anchor': 'end', class: 'ax', text: compactMoney(t, cur) }));
+  }
+  const ends = [];
+  // Primero las de comparación, al final la principal (queda encima).
+  for (const sr of [...series].reverse()) {
+    let d = '';
+    let pen = false;
+    let last = null;
+    for (const p of sr.points) {
+      if (p.value === null) { pen = false; continue; }
+      d += `${pen ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(p.value).toFixed(1)} `;
+      pen = true;
+      last = p;
+    }
+    g.append(s('path', { d, fill: 'none', stroke: sr.color, 'stroke-width': sr.main ? 2.5 : 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+    if (last) {
+      g.append(s('circle', { cx: x(last.date), cy: y(last.value), r: 4, fill: sr.color, stroke: 'var(--card)', 'stroke-width': 2 }));
+      ends.push({ y: y(last.value), name: sr.short || sr.name, main: sr.main });
+    }
+  }
+  // Nombres al final, separados al menos 14 px.
+  ends.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 14) ends[i].y = ends[i - 1].y + 14;
+  const over = ends.length ? ends[ends.length - 1].y - (padT + plotH) : 0;
+  if (over > 0) for (const e of ends) e.y -= over;
+  for (const e of ends) g.append(s('text', { x: padL + plotW + 8, y: e.y + 4, class: e.main ? 'end-label' : 'ax', text: e.name }));
+
+  // Eje X: de derecha a izquierda sin pisarse.
+  let lastX = Infinity;
+  for (let i = dates.length - 1; i >= 0; i--) {
+    const px = x(dates[i].date);
+    if (!dates[i].label || lastX - px < 56) continue;
+    const anchor = i === 0 ? 'start' : i === dates.length - 1 ? 'end' : 'middle';
+    g.append(s('text', { x: px, y: H - 8, 'text-anchor': anchor, class: 'ax', text: dates[i].label }));
+    lastX = px;
+  }
+
+  const cross = s('line', { y1: padT, y2: padT + plotH, stroke: 'var(--axis)', 'stroke-width': 1, opacity: 0 });
+  g.append(cross);
+  const overlay = s('rect', { x: padL, y: padT, width: plotW, height: plotH, fill: 'transparent', 'data-tip': '1' });
+  const move = (ev) => {
+    const box = g.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    let best = 0;
+    dates.forEach((p, i) => { if (Math.abs(x(p.date) - px) < Math.abs(x(dates[best].date) - px)) best = i; });
+    cross.setAttribute('x1', x(dates[best].date));
+    cross.setAttribute('x2', x(dates[best].date));
+    cross.setAttribute('opacity', 1);
+    showTip(ev.clientX, ev.clientY, dates[best].full, series.map((sr) => ({
+      color: sr.color, label: sr.name, value: sr.points[best].value === null ? '—' : formatMoney(sr.points[best].value, cur),
+    })));
+  };
+  const leave = () => { cross.setAttribute('opacity', 0); hideTip(); };
+  overlay.addEventListener('pointermove', move);
+  overlay.addEventListener('pointerdown', move);
+  overlay.addEventListener('pointerleave', leave);
+  g.append(overlay);
+  return g;
+}

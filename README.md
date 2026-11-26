@@ -252,9 +252,26 @@ Al crear o editar una meta puedes ponerle un nombre (ej. "Fondo de emergencia");
 
 Los extractos en **PDF** no se pueden leer todavía. Excel se lee con [SheetJS](https://sheetjs.com) 0.18.5 (carpeta `vendor/`, licencia Apache 2.0), que se descarga solo la primera vez que importas un Excel. Importa solo archivos descargados de tu banco.
 
+## Fase 7: comparar con un índice y rebalanceo
+
+Dos secciones nuevas en **Inversiones**, plegables y que se pueden quitar en Ajustes → Vista → *Inversiones*. Solo usan tus posiciones en dólares.
+
+### Comparar con un índice
+- Responde: *¿me habría ido mejor poniendo cada compra en un índice?* Cada compra que hiciste se "repite" ese mismo día y por el mismo monto en el ETF del índice; cada venta saca el mismo monto. Así las dos opciones tienen exactamente la misma plata entrando y saliendo.
+- Índices (por su ETF, porque el plan gratis trae ETF y no índices): **VOO** (S&P 500), **QQQ** (Nasdaq-100), **DIA** (Dow Jones), **VTI** (mercado total de EE. UU.), **VXUS** (fuera de EE. UU.), **IWM** (Russell 2000), o **＋ Otro** símbolo. Hasta 3 a la vez; por defecto VOO y QQQ. La elección se sincroniza.
+- Ves una tabla (valor hoy, ganancia y %), una frase con la diferencia frente al primero ("Vas US$ X por encima de VOO") y la gráfica del valor semana a semana, con *Ver como tabla*.
+- Tus dividendos cuentan como ganancia tuya; los del índice no se incluyen (precios de cierre sin dividendos), así que el índice queda un poco por debajo de lo real.
+- Necesita la clave de Twelve Data. El historial se pide **una vez al día** y se guarda en el dispositivo: 1 crédito por símbolo (tus acciones + los índices), máximo 8 por consulta. Al agregar un índice solo se pide ese.
+
+### Asignación objetivo y rebalanceo
+- **Definir objetivos:** qué % quieres de cada ETF o acción (por ejemplo VOO 60 %, VXUS 20 %). Lo que no tenga objetivo va a **Otras** con el % que sobra. No puede sumar más de 100.
+- Cada fila muestra una barra con lo que tienes hoy y una línea con el objetivo, y cuántos puntos (y dólares) te faltan o te sobran. ⚠ si te desvías 5 puntos o más.
+- **¿Cuánto vas a invertir ahora?** Escribe el monto y la app sugiere en qué comprar **sin vender nada**: primero lo que más se aleja del objetivo. Tocar una sugerencia abre la compra con el símbolo puesto.
+
 ## Pruebas
 
 - `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos, respaldo, compresión y limpieza del historial).
 - `node test-invest.mjs`: posiciones, costo promedio, fracciones, ventas sin respaldo, patrimonio y lectura de respuestas de precios.
 - `node test-import.mjs`: CSV y Excel (separadores, codificación), fechas, montos con signo, columnas, reglas y duplicados.
+- `node test-portfolio.mjs`: comparación con índices (mismas compras y ventas), historial, asignación, sugerencia de compra e historial de precios.
 - `node test-ledger.mjs`: lectura de montos (`12.500`, `1,234.56`…), saldos, totales del mes, filtros, resumen, papelera, restaurar versiones, cuotas y búsqueda.

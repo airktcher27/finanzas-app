@@ -13,11 +13,12 @@ import {
   savingsMonth, savingsYear, goalTargets, yearNeeded,
 } from './ledger.js';
 import { normSymbol, parseQty, computePositions, firstOversold, valuePositions, invFlows } from './invest.js';
-import { fetchPrices, fetchTrm } from './prices.js';
-import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTip } from './charts.js';
+import { fetchPrices, fetchTrm, fetchSeries } from './prices.js';
+import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTip, multiLine } from './charts.js';
+import { BENCHMARKS, benchName, actualResult, benchmarkResult, sampleDates, historyLines, allocation, contributionPlan, OTHER } from './portfolio.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.10.0 (Fase 6)';
+const VERSION = '0.11.0 (Fase 7)';
 const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
@@ -235,6 +236,8 @@ async function loadData() {
     fxNow: fx ? fx.price : 0, annual: infl && infl.annual !== null && infl.annual !== undefined ? infl.annual : null, today: todayStr(),
   });
   const budgets = live(all, 'presupuestos');
+  const benchCfg = live(all, 'config').find((r) => r.id === 'benchmarks') || null;
+  const allocCfg = live(all, 'config').find((r) => r.id === 'asignacion') || null;
   const rules = live(all, 'reglas');
   const importProfiles = new Map(live(all, 'config').filter((r) => r.id.startsWith('import-')).map((r) => [r.id.slice(7), r]));
   const goals = live(all, 'metas');
@@ -262,6 +265,8 @@ async function loadData() {
     infl,
     inv,
     budgets,
+    benchCfg,
+    allocCfg,
     rules,
     importProfiles,
     goals,
@@ -286,6 +291,7 @@ const dayLabel = (ds) => {
 // ---------- Vista (preferencias de este dispositivo) ----------
 const VIEW_KEY = 'finanzas.view';
 const TOGGLE_TABS = [['movs', 'Movimientos'], ['inv', 'Inversiones'], ['deudas', 'Deudas'], ['reportes', 'Reportes']];
+const INV_SECTIONS = [['inv-bench', 'Comparar con un índice'], ['inv-alloc', 'Asignación y rebalanceo']];
 const TOGGLE_SECTIONS = [['savings', 'Meta de ahorro'], ['cuotas', 'Compras a cuotas'], ['due', 'Vencimientos']];
 function getView() {
   let v = null;
@@ -362,6 +368,8 @@ function renderViewPrefs() {
     TOGGLE_TABS.map(([k, label]) => box(label, !v.hiddenTabs.includes(k), (on) => setView({ hiddenTabs: toggleIn(v.hiddenTabs, k, on) }))),
     h('div', { class: 'section-title', text: 'Resumen' }),
     TOGGLE_SECTIONS.map(([k, label]) => box(label, !v.hiddenSections.includes(k), (on) => setView({ hiddenSections: toggleIn(v.hiddenSections, k, on) }))),
+    h('div', { class: 'section-title', text: 'Inversiones' }),
+    INV_SECTIONS.map(([k, label]) => box(label, !v.hiddenSections.includes(k), (on) => setView({ hiddenSections: toggleIn(v.hiddenSections, k, on) }))),
     Object.entries(CURRENCIES).map(([k, c]) => box(`Total en ${c.label}`, !v.hiddenCurrencies.includes(k), (on) => setView({ hiddenCurrencies: toggleIn(v.hiddenCurrencies, k, on) }))),
   ].flat());
 }
@@ -886,6 +894,231 @@ function renderMovs(d) {
 
 
 
+
+
+// ---------- Comparar con un índice ----------
+// Historial de cierres guardado en este dispositivo (no se sincroniza): { on: fecha, start, data: { SÍMBOLO: serie } }.
+const pctTxt1 = (p) => (p === null || p === undefined ? '—' : `${p > 0 ? '+' : p < 0 ? '−' : ''}${(Math.abs(p) * 100).toFixed(1).replace('.', ',')}%`);
+const MAX_BENCH = 3;
+const BENCH_COLORS = ['var(--s2)', 'var(--s3)', 'var(--s4)'];
+let seriesCache = null;
+async function getSeriesCache() {
+  if (!seriesCache) seriesCache = (await store.getMeta('series')) || { on: '', start: '', data: {} };
+  return seriesCache;
+}
+
+function benchSymbols(d) {
+  return (d.benchCfg && Array.isArray(d.benchCfg.symbols) ? d.benchCfg.symbols : ['VOO', 'QQQ']).slice(0, MAX_BENCH);
+}
+
+async function setBenchSymbols(list) {
+  await saveRecord({ col: 'config', id: 'benchmarks', symbols: list, deleted: false });
+}
+
+function renderBenchmark(root, d) {
+  const box = collapsible('inv-bench', 'Comparar con un índice');
+  root.append(box.el);
+  const sel = benchSymbols(d);
+  const usdOps = d.ops.filter((o) => o.currency === 'USD');
+  const chips = h('div', { class: 'chips' }, BENCHMARKS.map((b) => {
+    const on = sel.includes(b.symbol);
+    return h('button', { type: 'button', class: 'chip' + (on ? ' on' : ''), 'aria-pressed': String(on), title: b.hint, onclick: () => {
+      if (on) return setBenchSymbols(sel.filter((x) => x !== b.symbol));
+      if (sel.length >= MAX_BENCH) { ui.benchMsg = `Puedes comparar con hasta ${MAX_BENCH} a la vez; quita uno primero.`; return render(); }
+      return setBenchSymbols([...sel, b.symbol]);
+    } }, h('strong', { text: b.symbol }), ` ${b.name}`);
+  }), sel.filter((x) => !BENCHMARKS.some((b) => b.symbol === x)).map((x) =>
+    h('button', { type: 'button', class: 'chip on', 'aria-pressed': 'true', onclick: () => setBenchSymbols(sel.filter((y) => y !== x)) }, h('strong', { text: x }), ' ✕')),
+  h('button', { type: 'button', class: 'chip', text: '＋ Otro', onclick: () => {
+    const v = normSymbol(prompt('Símbolo de un ETF o acción de EE. UU. (por ejemplo SPY o SCHD):') || '');
+    if (!v) return;
+    if (sel.includes(v)) return;
+    if (sel.length >= MAX_BENCH) { ui.benchMsg = `Puedes comparar con hasta ${MAX_BENCH} a la vez; quita uno primero.`; return render(); }
+    setBenchSymbols([...sel, v]);
+  } }));
+  box.body.append(h('p', { class: 'hint', style: 'margin:0 0 8px', text: '¿Te habría ido mejor poniendo cada compra en un índice? Elige con cuáles comparar (cada índice se sigue con su ETF).' }), chips);
+  if (ui.benchMsg) { box.body.append(h('p', { class: 'warn-text', text: ui.benchMsg })); ui.benchMsg = ''; }
+  const out = h('div', { class: 'bench-out' });
+  box.body.append(out);
+  if (!usdOps.some((o) => o.kind === 'compra')) { out.append(h('p', { class: 'hint', text: 'Registra tus compras en dólares para comparar.' })); return; }
+  if (!sel.length) { out.append(h('p', { class: 'hint', text: 'Elige al menos un índice.' })); return; }
+  if (!getPxKey()) {
+    out.append(h('p', { class: 'hint', text: 'Para comparar hace falta el historial de precios, que se trae con tu clave de Twelve Data (Ajustes → Precios de inversiones).' }));
+    return;
+  }
+  out.append(h('p', { class: 'hint', text: 'Cargando historial de precios…' }));
+  fillBenchmark(out, d, sel).catch((e) => { out.replaceChildren(h('p', { class: 'error', text: e.message || String(e) })); });
+}
+
+async function fillBenchmark(out, d, sel, force = false) {
+  const usdOps = d.ops.filter((o) => o.currency === 'USD');
+  // Una semana antes de la primera compra: si fue en fin de semana o festivo, se usa el cierre anterior.
+  const start = addDays(usdOps.map((o) => o.date).sort()[0], -7);
+  const held = [...new Set(usdOps.filter((o) => o.kind !== 'dividendo').map((o) => o.symbol))];
+  const need = [...new Set([...sel, ...held])];
+  const today = todayStr();
+  const cache = await getSeriesCache();
+  const fresh = (sym) => cache.on === today && cache.start <= start && cache.data[sym];
+  const missing = need.filter((x) => !fresh(x));
+  let problems = [];
+  if (missing.length && (force || ui.seriesTried !== today + need.join())) {
+    ui.seriesTried = today + need.join();
+    // Si cambió el rango o el día, se piden todos (1 crédito por símbolo, máx. 8 por consulta).
+    const ask = cache.on === today && cache.start <= start ? missing : need;
+    const r = await fetchSeries(ask, start, getPxKey());
+    if (r.fatal) problems.push(r.fatal);
+    for (const [k, v] of Object.entries(r.errors)) problems.push(`${k}: ${v}.`);
+    if (r.skipped.length) problems.push(`Por el límite gratis no se consultaron: ${r.skipped.join(', ')}.`);
+    if (Object.keys(r.series).length) {
+      if (!(cache.on === today && cache.start <= start)) { cache.data = {}; cache.on = today; cache.start = start; }
+      Object.assign(cache.data, r.series);
+      await store.setMeta('series', cache);
+    }
+  }
+  if (!out.isConnected) return;
+  const hist = cache.data;
+  const usdTotal = d.inv.totals.USD ? d.inv.totals.USD.value : 0;
+  const mine = actualResult(usdOps, usdTotal);
+  const res = sel.map((sym) => ({ sym, r: hist[sym] ? benchmarkResult(usdOps, hist[sym], today) : null }));
+  const row = (label, r, main) => h('tr', { class: main ? 'main' : '' },
+    h('td', { text: label }),
+    h('td', { class: 'num', text: r ? formatMoney(r.value, 'USD') : '—' }),
+    h('td', { class: 'num ' + (r ? toneOf(r.gain) : ''), text: r ? `${signedMoney(r.gain, 'USD')}` : '—' }),
+    h('td', { class: 'num ' + (r ? toneOf(r.gain) : ''), text: r ? pctTxt1(r.pct) : '—' }));
+  const nodes = [];
+  const first = res.find((x) => x.r);
+  if (first) {
+    const diff = mine.gain - first.r.gain;
+    nodes.push(h('p', { class: 'bench-verdict ' + toneOf(diff) },
+      diff >= 0 ? `Vas ${formatMoney(diff, 'USD')} por encima de ${first.sym} (${benchName(first.sym)}).` : `Vas ${formatMoney(-diff, 'USD')} por debajo de ${first.sym} (${benchName(first.sym)}): con ese índice tendrías más.`));
+  }
+  nodes.push(h('table', { class: 'tbl bench-tbl' },
+    h('thead', {}, h('tr', {}, h('th', { text: '' }), h('th', { class: 'num', text: 'Valor hoy' }), h('th', { class: 'num', text: 'Ganancia' }), h('th', { class: 'num', text: '%' }))),
+    h('tbody', {}, row('Tu portafolio', mine, true), res.map((x) => row(`Con ${x.sym}`, x.r)))));
+
+  // Gráfica de valor en el tiempo
+  const okBench = sel.filter((x) => hist[x]);
+  if (okBench.length && held.every((x) => hist[x])) {
+    const dates = sampleDates(addDays(start, 7), today);
+    const lines = historyLines(usdOps, hist, okBench, dates);
+    const pt = (p, i, arr) => ({ ...p, full: fmtDayFull(p.date),
+      label: i === arr.length - 1 ? 'Hoy' : i === 0 || p.date.slice(0, 7) !== arr[i - 1].date.slice(0, 7) ? benchMonth(p.date) : '' });
+    const series = [
+      { name: 'Tu portafolio', short: 'Tú', color: 'var(--s1)', main: true, points: lines.mine.map(pt) },
+      ...okBench.map((sym, i) => ({ name: `Con ${sym} (${benchName(sym)})`, short: sym, color: BENCH_COLORS[i], points: lines.bench[sym].map(pt) })),
+    ];
+    if (series[0].points.some((p) => p.value !== null)) {
+      const card = h('div', { class: 'chart-card bench-chart' },
+        h('h3', { text: 'Valor en el tiempo' }),
+        h('div', { class: 'legend' }, series.map((sr) => h('span', {}, h('i', { style: `background:${sr.color}` }), sr.name))));
+      nodes.push(card);
+      requestAnimationFrame(() => {
+        if (!card.isConnected) return;
+        card.append(multiLine(card.clientWidth - 28, series, 'USD', 'Valor de tu portafolio frente a los índices'),
+          tableView(['Fecha', ...series.map((sr) => sr.short)], series[0].points.map((p, i) => [p.full, ...series.map((sr) => (sr.points[i].value === null ? '—' : formatMoney(sr.points[i].value, 'USD')))])));
+      });
+    }
+  } else if (okBench.length) {
+    problems.push('Falta el historial de alguna de tus acciones para dibujar la gráfica.');
+  }
+  const noData = sel.filter((x) => !hist[x] && !problems.some((p) => p.startsWith(x + ':')));
+  if (noData.length) problems.push(`Sin historial de precios para ${noData.join(', ')}.`);
+  if (problems.length) nodes.push(h('p', { class: 'hint', text: problems.join(' ') }));
+  nodes.push(h('p', { class: 'hint', style: 'margin-top:8px' },
+    'Simula que cada compra y venta la hubieras hecho en el índice el mismo día y por el mismo monto. Tus dividendos cuentan; los del índice no. Precios de cierre, una vez al día. ',
+    h('button', { class: 'link-btn', type: 'button', text: 'Volver a consultar', onclick: () => { out.replaceChildren(h('p', { class: 'hint', text: 'Consultando…' })); fillBenchmark(out, ui.data, sel, true); } })));
+  out.replaceChildren(...nodes);
+}
+const benchMonth = (ds) => { const [y, m] = ds.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('es-CO', { month: 'short' }).replace('.', '') + (m === 1 ? ` ${String(y).slice(2)}` : ''); };
+const fmtDayFull = (ds) => { const [y, m, dd] = ds.split('-').map(Number); return new Date(y, m - 1, dd).toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric' }); };
+
+// ---------- Asignación objetivo y rebalanceo ----------
+function renderAllocation(root, d) {
+  const box = collapsible('inv-alloc', 'Asignación y rebalanceo');
+  root.append(box.el);
+  const rows = d.inv.rows.filter((r) => r.open && r.currency === 'USD').map((r) => ({ symbol: r.symbol, value: r.value }));
+  const targets = d.allocCfg && Array.isArray(d.allocCfg.targets) ? d.allocCfg.targets.filter((t) => t.pct > 0) : [];
+  if (!targets.length) {
+    box.body.append(h('p', { class: 'hint', text: 'Define qué porcentaje quieres de cada ETF o acción (por ejemplo 70 % VOO, 20 % VXUS, 10 % acciones sueltas). La app te muestra qué tan lejos estás y en qué poner el próximo aporte, sin vender nada.' }),
+      h('button', { class: 'btn primary', type: 'button', text: 'Definir objetivos', onclick: () => openAllocForm(rows, targets) }));
+    return;
+  }
+  const al = allocation(rows, targets);
+  const label = (b) => (b.symbol === OTHER ? `Otras${b.members && b.members.length ? ` (${b.members.join(', ')})` : ''}` : b.symbol);
+  box.body.append(h('div', { class: 'alloc' }, al.list.map((b) => {
+    const off = Math.abs(b.diff) >= 5;
+    return h('div', { class: 'alloc-row' },
+      h('div', { class: 'alloc-head' },
+        h('strong', { text: label(b) }),
+        h('span', { class: 'hint', text: `${b.actual.toFixed(0)} % de ${b.target.toFixed(0)} %` })),
+      h('div', { class: 'alloc-track', role: 'img', 'aria-label': `${label(b)}: ${b.actual.toFixed(0)} % actual, objetivo ${b.target.toFixed(0)} %` },
+        h('div', { class: 'alloc-fill', style: `width:${Math.min(100, b.actual).toFixed(1)}%` }),
+        h('div', { class: 'alloc-target', style: `left:${Math.min(100, b.target).toFixed(1)}%` })),
+      h('div', { class: 'alloc-note ' + (off ? 'warn' : ''), text: Math.abs(b.diff) < 1 ? '✓ en el objetivo'
+        : b.diff < 0 ? `${off ? '⚠ ' : ''}faltan ${(-b.diff).toFixed(0)} puntos (${formatMoney(b.gapValue, 'USD')})`
+        : `${off ? '⚠ ' : ''}sobran ${b.diff.toFixed(0)} puntos (${formatMoney(-b.gapValue, 'USD')})` }));
+  })), h('p', { class: 'hint', style: 'margin:6px 0 10px', text: 'La barra es lo que tienes hoy; la línea vertical, tu objetivo.' }));
+
+  const result = h('div', { class: 'list' });
+  const amountIn = h('input', { type: 'text', inputmode: 'decimal', class: 'money', placeholder: 'Ej: 200', value: ui.allocAmount || '', 'aria-label': 'Monto del próximo aporte en dólares' });
+  const calc = () => {
+    ui.allocAmount = amountIn.value;
+    const amt = parseAmount(amountIn.value, 'USD');
+    result.replaceChildren();
+    if (!amt) return;
+    const plan = contributionPlan(rows, targets, amt);
+    if (!plan.length) { result.append(h('p', { class: 'hint', text: 'Define objetivos para tus ETF o acciones para recibir una sugerencia.' })); return; }
+    for (const p of plan) {
+      result.append(h('button', { type: 'button', class: 'item', onclick: () => openInvForm(null, { symbol: p.symbol, kind: 'compra' }) },
+        h('div', { class: 'main' }, h('div', { class: 'title', text: `Compra ${p.symbol}` }), h('div', { class: 'sub', text: 'Toca para registrar la compra cuando la hagas' })),
+        h('div', { class: 'amt', text: formatMoney(p.amount, 'USD') })));
+    }
+  };
+  amountIn.addEventListener('input', calc);
+  box.body.append(h('label', {}, '¿Cuánto vas a invertir ahora? (US$)', amountIn), result,
+    h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn', type: 'button', text: 'Editar objetivos', onclick: () => openAllocForm(rows, targets) })));
+  calc();
+}
+
+function openAllocForm(rows, targets) {
+  const syms = [...new Set([...targets.map((t) => t.symbol), ...rows.map((r) => r.symbol)])];
+  const state = syms.map((sym) => ({ symbol: sym, pct: (targets.find((t) => t.symbol === sym) || {}).pct || '' }));
+  const err = h('p', { class: 'error', hidden: true });
+  const sumEl = h('p', { class: 'hint' });
+  const list = h('div', { class: 'list' });
+  const total = () => state.reduce((a, x) => a + (Number(String(x.pct).replace(',', '.')) || 0), 0);
+  const upd = () => {
+    const t = total();
+    sumEl.textContent = t > 100 ? `Suman ${t} %: no puede pasar de 100.` : `Suman ${t} %.${t < 100 ? ` El ${100 - t} % que sobra queda para «Otras» (lo que no tiene objetivo).` : ''}`;
+    sumEl.className = t > 100 ? 'error' : 'hint';
+  };
+  const draw = () => {
+    list.replaceChildren(...state.map((x) => h('div', { class: 'item alloc-edit' },
+      h('div', { class: 'main' }, h('div', { class: 'title', text: x.symbol })),
+      h('label', { class: 'pct' }, h('input', { type: 'text', inputmode: 'decimal', value: String(x.pct), 'aria-label': `Porcentaje objetivo de ${x.symbol}`, oninput: (e) => { x.pct = e.target.value; upd(); } }), ' %'))));
+    upd();
+  };
+  draw();
+  openSheet(h('form', { class: 'form', onsubmit: async (ev) => {
+    ev.preventDefault();
+    const t = total();
+    if (t > 100) { err.textContent = 'Los porcentajes no pueden sumar más de 100.'; err.hidden = false; return; }
+    const clean = state.map((x) => ({ symbol: x.symbol, pct: Math.round((Number(String(x.pct).replace(',', '.')) || 0) * 10) / 10 })).filter((x) => x.pct > 0);
+    closeSheet();
+    await saveRecord({ col: 'config', id: 'asignacion', targets: clean, deleted: false });
+  } },
+    h('h3', { text: 'Objetivo de asignación' }),
+    h('p', { class: 'hint', text: 'Qué porcentaje de tu portafolio en dólares quieres en cada uno. Deja en blanco lo que no quieras fijar.' }),
+    list,
+    h('button', { class: 'btn', type: 'button', text: '＋ Agregar símbolo', onclick: () => {
+      const v = normSymbol(prompt('Símbolo (por ejemplo VXUS):') || '');
+      if (v && !state.some((x) => x.symbol === v)) { state.push({ symbol: v, pct: '' }); draw(); }
+    } }),
+    sumEl, err,
+    h('div', { class: 'row end' },
+      h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }),
+      h('button', { class: 'btn primary', type: 'submit', text: 'Guardar' }))));
+}
 
 // ---------- Importar extractos ----------
 let xlsxLoading = null;
@@ -1493,6 +1726,10 @@ function renderInv(d) {
       h('p', { class: 'hint', text: 'Cuánto pesa cada posición en tu portafolio' }),
       rankedBars(list.map((r) => ({ label: r.symbol, value: r.value, share: r.value / total })), cur, 'del portafolio')));
   }
+
+  const hiddenSec = getView().hiddenSections;
+  if (totals.USD && !hiddenSec.includes('inv-bench')) renderBenchmark(root, d);
+  if (totals.USD && !hiddenSec.includes('inv-alloc')) renderAllocation(root, d);
 
   if (closed.length) {
     root.append(h('div', { class: 'section-title', text: 'Cerradas' }), h('div', { class: 'list' }, closed.map((r) =>
