@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { parseAmount, formatMoney, toInput } from './money.js';
 import { trashGroups, purgeable, restorePlan, versionSummary } from './trash.js';
+import { installmentPlan, interestMovs, unbilledPrincipal, activeInstallments, hasCuotas } from './ledger.js';
+import { searchMovs, listTotals, fold } from './ledger.js';
 import { debtsByPerson, personKey, accountBalances, filterMovs, monthTotals, netSummary, shiftMonth, todayStr } from './ledger.js';
 
 let n = 0;
@@ -376,6 +378,94 @@ ok('deudas por persona: agrupa nombres iguales, descuenta abonos, ignora saldada
   assert.equal(by['config/compactacion'], undefined);
   assert.deepEqual(versionSummary(version), { movs: 1, cuentas: 0, deudas: 0, inv: 0, metas: 0 });
   ok('restaurar versión: vuelve cada registro a como estaba, elimina lo creado después y no toca datos internos');
+}
+
+// --- compras a cuotas ---
+{
+  const card = { id: 'nu', type: 'credito', currency: 'COP', openingBalance: 0, cutDay: 24, payDay: 14, createdAt: 0 };
+  const accById = new Map([['nu', card]]);
+  // 1.200.000 a 12 cuotas sin interés, comprado el 10 de nov: primer corte 24 nov
+  const m0 = { id: 'tv', kind: 'gasto', accountId: 'nu', amount: 1200000, date: '2026-11-10', cuotas: { n: 12, rate: 0 } };
+  let plan = installmentPlan(m0, card);
+  assert.equal(plan.rows.length, 12);
+  assert.deepEqual(plan.rows.slice(0, 3).map((r) => r.cut), ['2026-11-24', '2026-12-24', '2027-01-24']);
+  assert.ok(plan.rows.every((r) => r.capital === 100000 && r.interest === 0));
+  // comprado el mismo día del corte: entra en ese corte
+  assert.equal(installmentPlan({ ...m0, date: '2026-11-24' }, card).rows[0].cut, '2026-11-24');
+  // con resto: 100.000 en 3 → 33.333, 33.333, 33.334
+  assert.deepEqual(installmentPlan({ ...m0, amount: 100000, cuotas: { n: 3, rate: 0 } }, card).rows.map((r) => r.capital), [33333, 33333, 33334]);
+  ok('cuotas sin interés: una por corte desde la compra, el resto en la última');
+
+  // con interés 2 % mensual, 1.000.000 a 6 cuotas: cuota fija francesa ≈ 178.526
+  const m1 = { id: 'cel', kind: 'gasto', accountId: 'nu', amount: 1000000, date: '2026-11-10', cuotas: { n: 6, rate: 0.02 } };
+  plan = installmentPlan(m1, card);
+  assert.equal(plan.cuota, 178526);
+  assert.equal(plan.rows[0].interest, 20000);
+  assert.equal(plan.rows.reduce((a, r) => a + r.capital, 0), 1000000);
+  assert.ok(Math.abs(plan.rows[5].cuota - 178526) <= 2);
+  ok('cuotas con interés: cuota fija, interés sobre el saldo y capital completo');
+
+  // intereses facturados hasta hoy como gastos virtuales
+  const today = '2026-12-30';
+  const ints = interestMovs([m0, m1], accById, today);
+  assert.deepEqual(ints.map((x) => [x.date, x.amount]), [['2026-11-24', 20000], ['2026-12-24', plan.rows[1].interest]]);
+  assert.ok(ints.every((x) => x.virtual && x.categoryId === 'cat-g-intereses'));
+  ok('los intereses de cada corte ya pasado cuentan como gasto en la tarjeta');
+
+  // capital sin facturar
+  assert.equal(unbilledPrincipal([m0], card, '2026-12-30', '2026-12-24'), 1000000);
+  assert.equal(unbilledPrincipal([m0], card, '2026-11-01', '2026-12-24'), 0, 'compras posteriores no cuentan');
+
+  // pago de la tarjeta: corte 24 dic ya pasó, pago el 14 ene → toca pagar 2 cuotas de la tv (nov+dic)? No: el
+  // extracto de dic incluye lo facturado hasta el 24 dic menos lo pagado: 2 cuotas de 100.000 (nov y dic)
+  const c = cardCycle(card, [m0], [], today);
+  assert.equal(c.cut, '2026-12-24');
+  assert.equal(c.toPay, 200000);
+  // pagaste la cuota de noviembre el 10 de dic → queda la de diciembre
+  const pago = { id: 'p', kind: 'transferencia', accountId: 'x', toAccountId: 'nu', amount: 100000, date: '2026-12-10' };
+  assert.equal(cardCycle(card, [m0, pago], [], today).toPay, 100000);
+  // antes del corte (16 dic): estimado = solo las cuotas que llegan en el corte del 24 dic
+  const e = cardCycle(card, [m0, pago], [], '2026-12-16');
+  assert.equal(e.estimate, true);
+  assert.equal(e.toPay, 100000);
+  // con interés: el estimado incluye el interés que se cobra en ese corte
+  const e2 = cardCycle(card, [m1, ...interestMovs([m1], accById, '2026-12-16')], [], '2026-12-16');
+  assert.equal(e2.toPay, plan.rows[0].cuota + plan.rows[1].capital + plan.rows[1].interest);
+  ok('pago de la tarjeta: solo las cuotas facturadas (y su interés), no el total de la compra');
+
+  const act = activeInstallments([m0, m1, { ...m0, id: 'x', cuotas: { n: 1 } }], accById, today);
+  assert.deepEqual(act.map((a) => [a.mov.id, a.billedCount, a.next.cut]), [['tv', 2, '2027-01-24'], ['cel', 2, '2027-01-24']]);
+  assert.equal(act[0].remainingCapital, 1000000);
+  assert.equal(hasCuotas({ ...m0, cuotas: { n: 1 } }), false);
+  ok('cuotas activas: cuántas van, la próxima y lo que falta');
+}
+
+// --- búsqueda ---
+{
+  const accById = new Map([['n', { id: 'n', name: 'Nequi', currency: 'COP' }], ['h', { id: 'h', name: 'Hapi', currency: 'USD' }]]);
+  const catById = new Map([['c1', { id: 'c1', name: 'Comida y restaurantes' }], ['c2', { id: 'c2', name: 'Transporte' }]]);
+  const L = [
+    { id: '1', kind: 'gasto', accountId: 'n', amount: 12500, categoryId: 'c1', note: 'Almuerzo en el Rápido', date: '2026-11-01' },
+    { id: '2', kind: 'gasto', accountId: 'n', amount: 9000, categoryId: 'c2', note: 'Uber', date: '2026-10-15' },
+    { id: '3', kind: 'ingreso', accountId: 'n', amount: 500000, categoryId: '', note: '', date: '2026-11-02' },
+    { id: '4', kind: 'transferencia', accountId: 'n', toAccountId: 'h', amount: 400000, toAmount: 10000, note: 'Pasar a Hapi', date: '2026-11-03' },
+    { id: '5', kind: 'gasto', accountId: 'h', amount: 1999, categoryId: '', note: 'Netflix', date: '2026-11-04' },
+  ];
+  const ctx = { catById, accById, dec: (c) => (c === 'USD' ? 2 : 0) };
+  const ids = (o) => searchMovs(L, o, ctx).map((m) => m.id);
+  assert.deepEqual(ids({ q: 'rapido' }), ['1'], 'sin tildes ni mayúsculas');
+  assert.deepEqual(ids({ q: 'comida' }), ['1'], 'por categoría');
+  assert.deepEqual(ids({ q: '12.500' }), ['1'], 'por monto con puntos');
+  assert.deepEqual(ids({ q: '19' }), ['5'], 'monto en dólares por la parte entera');
+  assert.deepEqual(ids({ q: 'hapi' }), ['5', '4'], 'por cuenta (origen o destino)');
+  assert.deepEqual(ids({ kind: 'gasto', from: '2026-11-01', to: '2026-11-30' }), ['5', '1']);
+  assert.deepEqual(ids({ categoryId: '-' }), ['5', '3'], 'sin categoría');
+  assert.deepEqual(ids({ q: 'uber transporte' }), ['2'], 'todas las palabras');
+  assert.deepEqual(ids({ accountId: 'h' }), ['5', '4']);
+  const tot = listTotals(searchMovs(L, {}, ctx), accById);
+  assert.deepEqual(tot.COP, { ingresos: 500000, gastos: 21500, n: 3 });
+  assert.equal(fold('Ñandú'), 'nandu');
+  ok('búsqueda: texto sin tildes, categoría, monto, cuenta, tipo, fechas y totales');
 }
 
 console.log(`\nTodas las pruebas pasaron (${n}).`);

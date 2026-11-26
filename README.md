@@ -229,8 +229,32 @@ Al crear o editar una meta puedes ponerle un nombre (ej. "Fondo de emergencia");
 - **Modo privacidad:** el botón del ojo, junto a Ajustes, cambia todos los montos por `•••••` (tampoco se ven en verde o rojo) hasta que lo vuelvas a tocar. Los porcentajes y las cantidades de acciones siguen visibles, y al abrir un formulario para editar sí ves el monto real. Puedes elegir que la app **abra siempre con los montos ocultos**.
 - En celulares angostos el botón de sincronizar queda solo con el ícono ⟳.
 
+## Fase 6: cuotas, búsqueda e importar extractos
+
+### Compras a cuotas
+- Al registrar un **gasto con una tarjeta de crédito** aparece **Cuotas** (1 a 48) y, si eliges más de una, el **interés mensual (%)** (vacío o 0 = sin interés). Debajo ves la cuota, la fecha de la primera y el total con intereses.
+- La **deuda** de la tarjeta sube por el total el día de la compra (así funciona el cupo). Lo que cambia es **el pago de cada extracto**: cada cuota llega en un corte, empezando por el primer corte desde la compra (si compras el mismo día del corte, entra en ese).
+- Con interés se usa **cuota fija** (sistema francés): el interés de cada mes es el saldo pendiente por la tasa. Cuando pasa cada corte, su interés aparece en Movimientos como gasto en **Intereses y comisiones** (categoría nueva), sube la deuda y cuenta en los reportes. Tocarlo abre la compra.
+- En el **Resumen**, la sección **Compras a cuotas** muestra cada compra con su próxima cuota y lo que falta, y el total pendiente. Se puede plegar u ocultar en Ajustes → Vista.
+- Es un cálculo aproximado: el banco puede redondear distinto o cobrar el primer interés por días. Si tu extracto no coincide, ajusta la tasa.
+
+### Búsqueda y filtros (Movimientos)
+- **Buscar** por nota, categoría, cuenta o monto (`12.500` o `12500`), sin importar tildes ni mayúsculas.
+- **Filtros:** tipo, categoría (o *Sin categoría*), cuenta y periodo: un mes, todo, o entre dos fechas. Arriba ves cuántos resultados hay y sus totales.
+- **Seleccionar varios:** marca movimientos y cámbiales la categoría de una vez, o elimínalos (quedan en la Papelera).
+
+### Importar extractos (CSV o Excel)
+1. Movimientos → **Importar extracto**. Elige la cuenta y el archivo (`.csv`, `.xlsx`, `.xls`) que descargaste de tu banco. Se lee solo en tu dispositivo.
+2. **Columnas:** la app adivina cuál es la fecha, la descripción y el monto (una columna con signo, o columnas de cargos y abonos) y te muestra cómo va a leer las primeras filas. Corrige lo que haga falta. La próxima vez, con un archivo del mismo formato, usa lo mismo.
+3. **Revisión:** cada fila con tipo y categoría. Lo que ya estaba registrado (mismo monto y tipo a ±2 días) y lo que parece un **pago o transferencia** entre tus cuentas quedan sin marcar, para no contarlo dos veces.
+4. La categoría que eliges para un comercio se aplica a sus otras filas y se guarda como **regla** («uber trip» → Transporte) para las próximas importaciones. Las reglas se ven y se quitan en Ajustes.
+5. Al terminar puedes **Deshacer la importación** (lo importado va a la Papelera) o verlo filtrado en Movimientos.
+
+Los extractos en **PDF** no se pueden leer todavía. Excel se lee con [SheetJS](https://sheetjs.com) 0.18.5 (carpeta `vendor/`, licencia Apache 2.0), que se descarga solo la primera vez que importas un Excel. Importa solo archivos descargados de tu banco.
+
 ## Pruebas
 
 - `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos, respaldo, compresión y limpieza del historial).
 - `node test-invest.mjs`: posiciones, costo promedio, fracciones, ventas sin respaldo, patrimonio y lectura de respuestas de precios.
-- `node test-ledger.mjs`: lectura de montos (`12.500`, `1,234.56`…), saldos, totales del mes, filtros, resumen, papelera y restaurar versiones.
+- `node test-import.mjs`: CSV y Excel (separadores, codificación), fechas, montos con signo, columnas, reglas y duplicados.
+- `node test-ledger.mjs`: lectura de montos (`12.500`, `1,234.56`…), saldos, totales del mes, filtros, resumen, papelera, restaurar versiones, cuotas y búsqueda.

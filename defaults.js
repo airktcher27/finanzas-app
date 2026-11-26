@@ -19,6 +19,7 @@ export const DEFAULT_CATEGORIES = [
   { id: 'cat-g-ropa', name: 'Ropa y compras', kind: 'gasto' },
   { id: 'cat-g-suscripciones', name: 'Suscripciones', kind: 'gasto' },
   { id: 'cat-g-regalos', name: 'Regalos', kind: 'gasto' },
+  { id: 'cat-g-intereses', name: 'Intereses y comisiones', kind: 'gasto' },
   { id: 'cat-g-otros', name: 'Otros gastos', kind: 'gasto' },
   { id: 'cat-i-ingresos', name: 'Ingresos', kind: 'ingreso' },
   { id: 'cat-i-otros', name: 'Otros ingresos', kind: 'ingreso' },

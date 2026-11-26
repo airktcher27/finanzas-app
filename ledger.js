@@ -48,6 +48,52 @@ export function filterMovs(movs, { month, accountId } = {}) {
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || 0) - (a.createdAt || 0)));
 }
 
+// ---------- Búsqueda ----------
+export const fold = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+// Filtra movimientos (y flujos de deudas/inversiones) por texto, tipo, categoría, cuenta y fechas.
+// Cada palabra del texto debe aparecer en la nota, la categoría, la cuenta o el monto ("12.500" o "12500").
+export function searchMovs(list, { q = '', kind = '', categoryId = '', accountId = '', from = '', to = '' } = {}, { catById, accById, dec = () => 0 } = {}) {
+  const tokens = fold(q).split(/\s+/).filter(Boolean);
+  return list
+    .filter((m) => {
+      if (kind && m.kind !== kind) return false;
+      if (categoryId && (m.categoryId || '') !== (categoryId === '-' ? '' : categoryId)) return false;
+      if (categoryId === '-' && !['gasto', 'ingreso'].includes(m.kind)) return false;
+      if (accountId && m.accountId !== accountId && m.toAccountId !== accountId) return false;
+      if (from && m.date < from) return false;
+      if (to && m.date > to) return false;
+      if (!tokens.length) return true;
+      const cat = catById && catById.get(m.categoryId);
+      const a1 = accById && accById.get(m.accountId);
+      const a2 = accById && accById.get(m.toAccountId);
+      const amt = m.amount ?? Math.abs(m.effect || 0);
+      const dd = a1 ? dec(a1.currency) : 0;
+      const nums = [String(Math.floor(amt / 10 ** dd)), dd ? String(amt) : ''];
+      const hay = fold([m.note, m.label, cat && cat.name, a1 && a1.name, a2 && a2.name].filter(Boolean).join(' '));
+      return tokens.every((t) => {
+        const digits = t.replace(/[.,$]/g, '');
+        if (/^\d+$/.test(digits) && nums.some((x) => x && x.includes(digits))) return true;
+        return hay.includes(t);
+      });
+    })
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || 0) - (a.createdAt || 0)));
+}
+
+// Totales de una lista ya filtrada, por moneda (sin transferencias ni flujos).
+export function listTotals(list, accById) {
+  const out = {};
+  for (const m of list) {
+    if (m.kind !== 'gasto' && m.kind !== 'ingreso') continue;
+    const a = accById.get(m.accountId);
+    if (!a) continue;
+    const t = (out[a.currency] ||= { ingresos: 0, gastos: 0, n: 0 });
+    if (m.kind === 'ingreso') t.ingresos += m.amount; else t.gastos += m.amount;
+    t.n += 1;
+  }
+  return out;
+}
+
 // Ingresos y gastos del mes por moneda. Las transferencias no cuentan
 // (pagar la tarjeta no es un gasto nuevo: el gasto ya se registró al comprar).
 export function monthTotals(movs, accById, month, accountId) {
@@ -200,6 +246,99 @@ export function prevDayBefore(dateStr, day) {
   return mkDate(y2, m2, day);
 }
 
+// ---------- Compras a cuotas ----------
+// Un gasto con tarjeta puede llevar cuotas: { n, rate } (rate = interés MENSUAL, 0.0189 = 1,89 %).
+// La deuda con el banco sube por el total el día de la compra; lo que cambia es CUÁNTO llega en cada
+// extracto: la cuota k se factura en el k-ésimo corte desde la compra (el corte del mismo día cuenta).
+// Con interés se usa cuota fija (sistema francés): interés de cada mes = saldo pendiente × tasa.
+export const hasCuotas = (m) => !!(m && m.kind === 'gasto' && m.cuotas && m.cuotas.n > 1 && !m.virtual);
+
+export function installmentPlan(m, acc) {
+  const n = Math.round(m.cuotas.n);
+  const r = Math.max(0, Number(m.cuotas.rate) || 0);
+  const P = m.amount;
+  const cutDay = acc && Number(acc.cutDay) >= 1 && Number(acc.cutDay) <= 31 ? Number(acc.cutDay) : null;
+  const [py, pm, pd] = m.date.split('-').map(Number);
+  let first;
+  if (cutDay) first = nextDayOnOrAfter(m.date, cutDay);
+  else { const [y1, m1] = monthAdd(py, pm, 1); first = mkDate(y1, m1, pd); }
+  const [fy, fm, fd] = first.split('-').map(Number);
+  const day = cutDay || fd;
+  const fixed = r > 0 ? Math.round((P * r) / (1 - (1 + r) ** -n)) : 0;
+  const base = Math.floor(P / n);
+  const rows = [];
+  let bal = P;
+  for (let k = 1; k <= n; k++) {
+    const [y, mo] = monthAdd(fy, fm, k - 1);
+    const interest = r > 0 ? Math.round(bal * r) : 0;
+    const capital = k === n ? bal : r > 0 ? Math.min(bal, fixed - interest) : base;
+    bal -= capital;
+    rows.push({ k, cut: mkDate(y, mo, day), capital, interest, cuota: capital + interest });
+  }
+  return { n, rate: r, rows, total: rows.reduce((a, x) => a + x.cuota, 0), cuota: rows[0].cuota };
+}
+
+// Intereses ya facturados (corte <= hoy) como gastos "virtuales" en la tarjeta: suben la deuda y
+// cuentan como gasto del mes en la categoría de intereses. No se guardan: se recalculan siempre.
+export const INTEREST_CAT = 'cat-g-intereses';
+export function interestMovs(movs, accById, today) {
+  const out = [];
+  for (const m of movs) {
+    if (!hasCuotas(m) || !(m.cuotas.rate > 0)) continue;
+    const plan = installmentPlan(m, accById.get(m.accountId));
+    for (const row of plan.rows) {
+      if (row.cut > today || !row.interest) continue;
+      out.push({
+        col: 'movs', id: `int:${m.id}:${row.k}`, virtual: true, parentId: m.id, kind: 'gasto', date: row.cut,
+        accountId: m.accountId, amount: row.interest, categoryId: INTEREST_CAT,
+        note: `Intereses cuota ${row.k}/${plan.n}${m.note ? ' · ' + m.note : ''}`, createdAt: m.createdAt || 0,
+      });
+    }
+  }
+  return out;
+}
+
+// Capital de compras a cuotas hechas hasta `purchasedBy` que aún NO se factura en el corte `billedThrough`.
+export function unbilledPrincipal(movs, acc, purchasedBy, billedThrough) {
+  let out = 0;
+  for (const m of movs) {
+    if (!hasCuotas(m) || m.accountId !== acc.id || m.date > purchasedBy) continue;
+    for (const row of installmentPlan(m, acc).rows) if (row.cut > billedThrough) out += row.capital;
+  }
+  return out;
+}
+
+// Interés que se factura justo en el corte `cut` (para estimar el próximo pago).
+function interestOnCut(movs, acc, purchasedBy, cut) {
+  let out = 0;
+  for (const m of movs) {
+    if (!hasCuotas(m) || m.accountId !== acc.id || m.date > purchasedBy) continue;
+    for (const row of installmentPlan(m, acc).rows) if (row.cut === cut) out += row.interest;
+  }
+  return out;
+}
+
+// Compras a cuotas con algo pendiente: cuántas cuotas van facturadas, lo que falta y la próxima cuota.
+export function activeInstallments(movs, accById, today) {
+  const out = [];
+  for (const m of movs) {
+    if (!hasCuotas(m)) continue;
+    const acc = accById.get(m.accountId);
+    if (!acc) continue;
+    const plan = installmentPlan(m, acc);
+    const billed = plan.rows.filter((r) => r.cut <= today);
+    const next = plan.rows.find((r) => r.cut > today);
+    if (!next) continue;
+    const pending = plan.rows.filter((r) => r.cut > today);
+    out.push({
+      mov: m, acc, plan, billedCount: billed.length, next,
+      remainingCapital: pending.reduce((a, r) => a + r.capital, 0),
+      remainingTotal: pending.reduce((a, r) => a + r.cuota, 0),
+    });
+  }
+  return out.sort((a, b) => (a.next.cut < b.next.cut ? -1 : a.next.cut > b.next.cut ? 1 : 0));
+}
+
 function effectsOn(accId, movs, flows) {
   const out = [];
   for (const m of movs) {
@@ -226,9 +365,11 @@ export function cardCycle(acc, movs, flows, today) {
   const balanceAt = (date) => (acc.openingBalance || 0) + eff.filter((e) => e.date <= date).reduce((s, e) => s + e.effect, 0);
 
   if (!cutPassed) {
-    return { due, cut, nextCut, cutPassed, estimate: true, toPay: Math.max(0, -balanceAt(today)), newCharges: 0 };
+    // Lo que debes hoy, sin las cuotas que se facturan después de este corte, más el interés que llega en él.
+    const est = -balanceAt(today) - unbilledPrincipal(movs, acc, today, cut) + interestOnCut(movs, acc, today, cut);
+    return { due, cut, nextCut, cutPassed, estimate: true, toPay: Math.max(0, est), newCharges: 0 };
   }
-  const debtAtCut = Math.max(0, -balanceAt(cut));
+  const debtAtCut = Math.max(0, -balanceAt(cut) - unbilledPrincipal(movs, acc, cut, cut));
   let paid = 0;
   let newCharges = 0;
   for (const e of eff) {

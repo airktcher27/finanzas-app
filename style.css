@@ -91,7 +91,7 @@ h3 { margin: 0 0 4px; }
 .form { display: grid; gap: 12px; }
 label { display: grid; gap: 4px; font-size: .9rem; color: var(--muted); }
 label.check { display: flex; align-items: center; gap: 8px; color: var(--text); }
-input[type="text"], input[type="password"], input[type="date"], select {
+input[type="text"], input[type="password"], input[type="date"], input[type="search"], select {
   width: 100%; padding: 11px 12px; font: inherit; color: var(--text);
   background: var(--card); border: 1px solid var(--border); border-radius: 10px;
 }
@@ -280,3 +280,36 @@ svg [tabindex]:focus-visible { outline: 2px solid var(--accent); }
 @media (max-width: 400px) { #btn-sync .lbl { display: none; } #btn-sync { padding: 8px 12px; font-size: 1.1rem; line-height: 1; } }
 /* Modo privacidad: tampoco el color delata si un monto es positivo o negativo */
 .privado .amt.pos, .privado .amt.neg, .privado .line .pos, .privado .line .neg, .privado .pc-main.pos, .privado .pc-main.neg { color: var(--text); }
+
+/* Búsqueda y selección en Movimientos */
+.searchbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.searchbar .search { flex: 1; min-width: 0; }
+.searchbar .btn.active { border-color: var(--accent); }
+.filters-panel { display: grid; gap: 8px; margin-bottom: 12px; }
+.filters-panel .section-title { margin: 4px 0 0; }
+.selrow { display: flex; align-items: stretch; gap: 0; cursor: pointer; border-radius: 12px; }
+.selrow .tick { flex: none; width: 30px; display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--accent-text); }
+.selrow .tick { border: 2px solid var(--border); border-radius: 8px; width: 24px; height: 24px; align-self: center; margin-right: 10px; }
+.selrow.on .tick { background: var(--accent); border-color: var(--accent); }
+.selrow .item { flex: 1; pointer-events: none; }
+.selrow.on .item { border-color: var(--accent); }
+.selbar { position: sticky; bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px; margin-top: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.12); }
+.selbar select { flex: 1 1 160px; min-width: 0; }
+
+/* Importar extractos */
+.imp-table { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; max-width: 100%; }
+.imp-table table { border-collapse: collapse; font-size: .78rem; white-space: nowrap; }
+.imp-table th, .imp-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+.imp-table tr.head th { background: var(--bg); font-weight: 600; }
+.imp-list { display: grid; gap: 8px; }
+.imp-row { display: flex; gap: 10px; align-items: flex-start; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.imp-row.dup { opacity: .7; }
+.imp-check { padding-top: 2px; }
+.imp-main { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.imp-main .title { font-weight: 600; overflow-wrap: anywhere; }
+.imp-main .amt { white-space: nowrap; font-weight: 600; }
+.imp-main .sub { font-size: .85rem; color: var(--muted); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.imp-sel { display: grid; grid-template-columns: 110px 1fr; gap: 6px; }
+.imp-sel select { padding: 7px 8px; font-size: .9rem; }
+.tag { font-size: .75rem; border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; color: var(--text); }
+.amt.neg { color: var(--danger); } .amt.pos { color: var(--ok); }

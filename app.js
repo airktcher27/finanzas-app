@@ -2,12 +2,13 @@ import { openStore } from './store.js';
 import { createGithub } from './github.js';
 import { runSync, exportEncrypted, importEncrypted, CAP_GZ } from './sync.js';
 import { decryptJson, deriveKey } from './crypto.js';
+import { decodeBytes, parseCSV, guessMapping, buildRows, markDuplicates, merchantKey, ruleFor } from './importer.js';
 import { trashGroups, purgeable, restorePlan, versionSummary, TRASH_DAYS } from './trash.js';
 import { SyncError } from './errors.js';
 import { parseAmount, formatMoney, toInput, dec, CURRENCIES, setMoneyHidden, moneyHidden } from './money.js';
 import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
-  debtFlows, debtRemaining, debtIsDone, debtTotals, debtsByPerson, personKey, addDays, cardCycle,
+  debtFlows, debtRemaining, debtIsDone, debtTotals, debtsByPerson, personKey, searchMovs, listTotals, monthEnd, interestMovs, activeInstallments, installmentPlan, hasCuotas, addDays, cardCycle,
   categoryTotals, lastMonths, monthSeries, netWorthPoints, budgetState,
   savingsMonth, savingsYear, goalTargets, yearNeeded,
 } from './ledger.js';
@@ -16,7 +17,7 @@ import { fetchPrices, fetchTrm } from './prices.js';
 import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTip } from './charts.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.9.0 (Fase 5)';
+const VERSION = '0.10.0 (Fase 6)';
 const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
@@ -25,7 +26,7 @@ let store;
 let deviceId;
 let syncing = false;
 let syncTimer = null;
-const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP', debtPerson: '', pxMsg: '', pxBusy: false, lastPxTry: 0, fxMsg: '', fxBusy: false, lastFxTry: 0 };
+const ui = { tab: 'resumen', month: monthOf(todayStr()), filterAccount: '', data: null, rMonth: monthOf(todayStr()), rCur: 'COP', debtPerson: '', q: '', fKind: '', fCat: '', period: 'mes', from: '', to: '', showFilters: false, selecting: false, sel: new Set(), searchFocus: false, pxMsg: '', pxBusy: false, lastPxTry: 0, fxMsg: '', fxBusy: false, lastFxTry: 0 };
 
 // ---------- Ayudantes de DOM ----------
 function h(tag, props, ...kids) {
@@ -202,21 +203,23 @@ async function purgeTrash(everything) {
 }
 
 async function seedDefaults() {
-  if (await store.getMeta('seededCats')) return;
+  if ((await store.getMeta('seededCats')) === 2) return;
   const all = await store.getAllRecords();
   const have = new Set(all.filter((r) => r.col === 'categorias').map((r) => r.id));
   const recs = DEFAULT_CATEGORIES.filter((c) => !have.has(c.id)).map((c, i) => ({
     col: 'categorias', id: c.id, name: c.name, kind: c.kind, archived: false, deleted: false, order: i, updatedAt: 0, dev: '',
   }));
   await store.putRecords(recs);
-  await store.setMeta('seededCats', true);
+  await store.setMeta('seededCats', 2);
 }
 
 async function loadData() {
   const all = await store.getAllRecords();
   const accounts = live(all, 'cuentas').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const cats = live(all, 'categorias').sort((a, b) => (a.order ?? 999) - (b.order ?? 999) || a.name.localeCompare(b.name, 'es'));
-  const movs = live(all, 'movs');
+  const realMovs = live(all, 'movs');
+  const liveAccById = new Map(live(all, 'cuentas').map((a) => [a.id, a]));
+  const movs = [...realMovs, ...interestMovs(realMovs, liveAccById, todayStr())];
   const debts = live(all, 'deudas').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const debtIds = new Set(debts.map((x) => x.id));
   const abonos = live(all, 'abonos').filter((a) => debtIds.has(a.debtId));
@@ -232,6 +235,8 @@ async function loadData() {
     fxNow: fx ? fx.price : 0, annual: infl && infl.annual !== null && infl.annual !== undefined ? infl.annual : null, today: todayStr(),
   });
   const budgets = live(all, 'presupuestos');
+  const rules = live(all, 'reglas');
+  const importProfiles = new Map(live(all, 'config').filter((r) => r.id.startsWith('import-')).map((r) => [r.id.slice(7), r]));
   const goals = live(all, 'metas');
   const cycles = new Map();
   for (const a of accounts) {
@@ -243,6 +248,8 @@ async function loadData() {
     accounts,
     cats,
     movs,
+    realMovs,
+    installments: activeInstallments(realMovs, liveAccById, todayStr()),
     debts,
     abonos,
     flows,
@@ -255,6 +262,8 @@ async function loadData() {
     infl,
     inv,
     budgets,
+    rules,
+    importProfiles,
     goals,
     cycles,
     debtTot: debtTotals(debts, abonos),
@@ -277,7 +286,7 @@ const dayLabel = (ds) => {
 // ---------- Vista (preferencias de este dispositivo) ----------
 const VIEW_KEY = 'finanzas.view';
 const TOGGLE_TABS = [['movs', 'Movimientos'], ['inv', 'Inversiones'], ['deudas', 'Deudas'], ['reportes', 'Reportes']];
-const TOGGLE_SECTIONS = [['savings', 'Meta de ahorro'], ['due', 'Vencimientos']];
+const TOGGLE_SECTIONS = [['savings', 'Meta de ahorro'], ['cuotas', 'Compras a cuotas'], ['due', 'Vencimientos']];
 function getView() {
   let v = null;
   try { v = JSON.parse(localStorage.getItem(VIEW_KEY)); } catch { /* sin almacenamiento */ }
@@ -374,7 +383,7 @@ async function render() {
   else if (ui.tab === 'inv') renderInv(ui.data);
   else if (ui.tab === 'deudas') renderDeudas(ui.data);
   else if (ui.tab === 'reportes') renderReportes(ui.data);
-  else { renderCategories(ui.data); renderViewPrefs(); renderHistoryBox(); }
+  else { renderCategories(ui.data); renderRules(ui.data); renderViewPrefs(); renderHistoryBox(); }
 }
 
 async function showTab(name) {
@@ -439,6 +448,32 @@ function collapsible(key, title, note) {
   return { el, body };
 }
 
+// Compras a cuotas con algo pendiente, agrupadas por moneda.
+function renderInstallments(root, d) {
+  const list = d.installments;
+  if (!list.length) return;
+  const box = collapsible('cuotas', 'Compras a cuotas', String(list.length));
+  root.append(box.el);
+  const byCur = {};
+  for (const it of list) {
+    const t = (byCur[it.acc.currency] ||= { left: 0, next: 0 });
+    t.left += it.remainingTotal;
+    t.next += it.next.cuota;
+  }
+  box.body.append(h('p', { class: 'hint', style: 'margin:0 0 8px' }, Object.entries(byCur).map(([cur, t]) =>
+    `Te faltan ${formatMoney(t.left, cur)} en cuotas; en el próximo extracto llegan ${formatMoney(t.next, cur)}.`).join(' ')));
+  box.body.append(h('div', { class: 'list' }, list.map((it) => {
+    const cat = d.catById.get(it.mov.categoryId);
+    const name = it.mov.note || (cat ? cat.name : 'Compra');
+    const cur = it.acc.currency;
+    return h('button', { type: 'button', class: 'item', onclick: () => openMovForm(it.mov) },
+      h('div', { class: 'main' },
+        h('div', { class: 'title', text: name }),
+        h('div', { class: 'sub', text: `${it.acc.name} · cuota ${it.billedCount + 1} de ${it.plan.n} el ${shortDate(it.next.cut)}: ${formatMoney(it.next.cuota, cur)}` })),
+      h('div', { class: 'amt' }, formatMoney(it.remainingTotal, cur), h('small', { text: 'por pagar' })));
+  })));
+}
+
 function renderResumen(d) {
   const root = $('#resumen-body');
   root.replaceChildren();
@@ -480,6 +515,7 @@ function renderResumen(d) {
   }
 
   if (!view.hiddenSections.includes('savings')) renderSavings(root, d);
+  if (!view.hiddenSections.includes('cuotas')) renderInstallments(root, d);
 
   const limit = addDays(todayStr(), 7);
   const soon = [];
@@ -696,38 +732,110 @@ function movRow(m, d) {
     }
   } else {
     title = cat ? cat.name : 'Sin categoría';
-    sub = [m.note, from ? from.name : null].filter(Boolean).join(' · ');
+    sub = [m.note, hasCuotas(m) ? `${m.cuotas.n} cuotas` : null, from ? from.name : null].filter(Boolean).join(' · ');
     amt = (m.kind === 'ingreso' ? '+' : '−') + formatMoney(m.amount, fromCur);
     cls = m.kind === 'ingreso' ? 'pos' : 'neg';
   }
-  return h('button', { type: 'button', class: 'item', onclick: () => openMovForm(m) },
+  const open = m.virtual ? () => { const p = d.realMovs.find((x) => x.id === m.parentId); if (p) openMovForm(p); } : () => openMovForm(m);
+  return h('button', { type: 'button', class: 'item', onclick: open },
     h('div', { class: 'main' }, h('div', { class: 'title', text: title }), h('div', { class: 'sub', text: sub })),
     h('div', { class: 'amt ' + cls }, amt, small && h('small', { text: small })));
 }
 
+// ---------- Movimientos: búsqueda, filtros y selección ----------
+const filtersActive = () => !!(ui.q.trim() || ui.fKind || ui.fCat || ui.filterAccount || ui.period !== 'mes');
+let searchTimer = null;
+
 function renderMovs(d) {
   const root = $('#movs-body');
+  const ae = document.activeElement;
+  const hadFocus = !!(ae && ae.classList && ae.classList.contains('search') && root.contains(ae));
+  const caret = hadFocus ? ae.selectionStart : 0;
   root.replaceChildren();
-  const bar = h('div', { class: 'monthbar' },
-    h('button', { class: 'btn', type: 'button', 'aria-label': 'Mes anterior', text: '◀', onclick: () => { ui.month = shiftMonth(ui.month, -1); render(); } }),
-    h('strong', { text: monthLabel(ui.month) }),
-    h('button', { class: 'btn', type: 'button', 'aria-label': 'Mes siguiente', text: '▶', onclick: () => { ui.month = shiftMonth(ui.month, 1); render(); } }));
-  const sel = h('select', { 'aria-label': 'Filtrar por cuenta', onchange: (e) => { ui.filterAccount = e.target.value; render(); } },
-    opt('', 'Todas las cuentas', !ui.filterAccount),
-    d.accounts.map((a) => opt(a.id, a.name + (a.archived ? ' (archivada)' : ''), ui.filterAccount === a.id)));
-  root.append(bar, sel);
 
-  const totals = monthTotals(d.movs, d.accById, ui.month, ui.filterAccount);
-  const parts = Object.entries(totals).map(([cur, t]) => `${cur}: ingresos ${formatMoney(t.ingresos, cur)} · gastos ${formatMoney(t.gastos, cur)}`);
-  root.append(h('p', { class: 'totals', text: parts.join('   |   ') || 'Sin ingresos ni gastos este mes.' }));
+  // Búsqueda
+  const search = h('input', { type: 'search', class: 'search', placeholder: 'Buscar: nota, categoría, cuenta o monto', 'aria-label': 'Buscar movimientos', value: ui.q,
+    oninput: (e) => { ui.q = e.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(render, 250); } });
+  const nFilters = [ui.fKind, ui.fCat, ui.filterAccount, ui.period !== 'mes'].filter(Boolean).length;
+  root.append(h('div', { class: 'searchbar' }, search,
+    h('button', { class: 'btn' + (ui.showFilters ? ' active' : ''), type: 'button', 'aria-expanded': String(!!ui.showFilters),
+      text: nFilters ? `Filtros (${nFilters})` : 'Filtros', onclick: () => { ui.showFilters = !ui.showFilters; render(); } })));
+  if (hadFocus) queueMicrotask(() => { search.focus(); search.setSelectionRange(caret, caret); });
 
-  const list = filterMovs([...d.movs, ...d.flows], { month: ui.month, accountId: ui.filterAccount });
+  // Panel de filtros
+  if (ui.showFilters) {
+    const seg = (opts, cur, onpick) => h('div', { class: 'seg', style: `grid-template-columns:repeat(${opts.length},1fr)` },
+      opts.map(([k, label]) => h('button', { type: 'button', class: k === cur ? 'on' : '', text: label, onclick: () => onpick(k) })));
+    const cats = d.cats.filter((c) => !ui.fKind || c.kind === ui.fKind);
+    root.append(h('div', { class: 'card filters-panel' },
+      h('div', { class: 'section-title', text: 'Tipo' }),
+      seg([['', 'Todos'], ['gasto', 'Gastos'], ['ingreso', 'Ingresos'], ['transferencia', 'Transf.']], ui.fKind, (k) => { ui.fKind = k; if (k === 'transferencia') ui.fCat = ''; render(); }),
+      ui.fKind !== 'transferencia' && h('label', {}, 'Categoría',
+        h('select', { onchange: (e) => { ui.fCat = e.target.value; render(); } },
+          opt('', 'Todas', !ui.fCat), opt('-', 'Sin categoría', ui.fCat === '-'),
+          cats.map((c) => opt(c.id, c.name + (c.archived ? ' (archivada)' : ''), ui.fCat === c.id)))),
+      h('label', {}, 'Cuenta',
+        h('select', { 'aria-label': 'Filtrar por cuenta', onchange: (e) => { ui.filterAccount = e.target.value; render(); } },
+          opt('', 'Todas las cuentas', !ui.filterAccount),
+          d.accounts.map((a) => opt(a.id, a.name + (a.archived ? ' (archivada)' : ''), ui.filterAccount === a.id)))),
+      h('div', { class: 'section-title', text: 'Periodo' }),
+      seg([['mes', 'Un mes'], ['todo', 'Todo'], ['rango', 'Fechas']], ui.period, (k) => { ui.period = k; render(); }),
+      ui.period === 'rango' && h('div', { class: 'row wrap', style: 'gap:8px' },
+        h('label', { style: 'flex:1' }, 'Desde', h('input', { type: 'date', value: ui.from, onchange: (e) => { ui.from = e.target.value; render(); } })),
+        h('label', { style: 'flex:1' }, 'Hasta', h('input', { type: 'date', value: ui.to, onchange: (e) => { ui.to = e.target.value; render(); } }))),
+      filtersActive() && h('button', { class: 'link-btn', type: 'button', text: 'Quitar búsqueda y filtros', onclick: () => {
+        Object.assign(ui, { q: '', fKind: '', fCat: '', filterAccount: '', period: 'mes', from: '', to: '' });
+        render();
+      } })));
+  }
+
+  if (ui.period === 'mes') {
+    root.append(h('div', { class: 'monthbar' },
+      h('button', { class: 'btn', type: 'button', 'aria-label': 'Mes anterior', text: '◀', onclick: () => { ui.month = shiftMonth(ui.month, -1); render(); } }),
+      h('strong', { text: monthLabel(ui.month) }),
+      h('button', { class: 'btn', type: 'button', 'aria-label': 'Mes siguiente', text: '▶', onclick: () => { ui.month = shiftMonth(ui.month, 1); render(); } })));
+  }
+
+  const from = ui.period === 'mes' ? ui.month + '-01' : ui.period === 'rango' ? ui.from : '';
+  const to = ui.period === 'mes' ? monthEnd(ui.month) : ui.period === 'rango' ? ui.to : '';
+  const list = searchMovs([...d.movs, ...d.flows], { q: ui.q, kind: ui.fKind, categoryId: ui.fCat, accountId: ui.filterAccount, from, to },
+    { catById: d.catById, accById: d.accById, dec });
+
+  const tot = listTotals(list, d.accById);
+  const parts = Object.entries(tot).map(([cur, t]) => `${cur}: ingresos ${formatMoney(t.ingresos, cur)} · gastos ${formatMoney(t.gastos, cur)}`);
+  const searching = filtersActive();
+  root.append(h('p', { class: 'totals' },
+    searching ? `${list.length} resultado(s)${parts.length ? ' · ' : ''}` : '',
+    parts.join('   |   ') || (searching ? '' : 'Sin ingresos ni gastos este mes.')));
+
+  const selectableShown = list.some((m) => !m.virtual && ['gasto', 'ingreso', 'transferencia'].includes(m.kind));
+  if (!ui.selecting) {
+    root.append(h('div', { class: 'row between', style: 'margin:-4px 0 4px' },
+      h('button', { class: 'link-btn', type: 'button', text: '⇪ Importar extracto', onclick: () => openImport() }),
+      selectableShown ? h('button', { class: 'link-btn', type: 'button', text: 'Seleccionar varios', onclick: () => { ui.selecting = true; ui.sel = new Set(); render(); } }) : h('span')));
+  }
   if (!list.length) {
     root.append(h('div', { class: 'empty' },
-      h('p', { text: 'No hay movimientos en este mes.' }),
-      h('button', { class: 'btn primary', type: 'button', onclick: () => openMovForm(), text: '＋ Añadir movimiento' })));
+      h('p', { text: searching ? 'No hay movimientos con esa búsqueda o filtros.' : 'No hay movimientos en este mes.' }),
+      searching
+        ? h('button', { class: 'btn', type: 'button', text: 'Quitar búsqueda y filtros', onclick: () => { Object.assign(ui, { q: '', fKind: '', fCat: '', filterAccount: '', period: 'mes', from: '', to: '' }); render(); } })
+        : h('button', { class: 'btn primary', type: 'button', onclick: () => openMovForm(), text: '＋ Añadir movimiento' })));
     return;
   }
+
+  // Selección para cambiar categoría o eliminar varios a la vez
+  const selectable = (m) => !m.virtual && ['gasto', 'ingreso', 'transferencia'].includes(m.kind);
+  if (ui.selecting) {
+    const shown = list.filter(selectable);
+    const all = shown.length && shown.every((m) => ui.sel.has(m.id));
+    root.append(h('div', { class: 'row between', style: 'margin:-4px 0 4px' },
+      h('button', { class: 'link-btn', type: 'button', text: all ? 'Quitar todos' : `Seleccionar los ${shown.length}`, onclick: () => {
+        ui.sel = all ? new Set() : new Set(shown.map((m) => m.id));
+        render();
+      } }),
+      h('span', { class: 'hint', text: `${ui.sel.size} seleccionado(s)` })));
+  }
+
   let lastDate = null;
   let ul = null;
   for (const m of list) {
@@ -737,11 +845,283 @@ function renderMovs(d) {
       root.append(ul);
       lastDate = m.date;
     }
-    ul.append(movRow(m, d));
+    const row = movRow(m, d);
+    if (ui.selecting && selectable(m)) {
+      const on = ui.sel.has(m.id);
+      row.setAttribute('tabindex', '-1');
+      ul.append(h('div', { class: 'selrow' + (on ? ' on' : ''), role: 'checkbox', 'aria-checked': String(on), tabindex: '0',
+        onclick: () => { if (on) ui.sel.delete(m.id); else ui.sel.add(m.id); render(); },
+        onkeydown: (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); e.currentTarget.click(); } } },
+        h('span', { class: 'tick', 'aria-hidden': 'true', text: on ? '✓' : '' }), row));
+    } else ul.append(row);
+  }
+
+  if (ui.selecting) {
+    const picked = d.realMovs.filter((m) => ui.sel.has(m.id));
+    const catSel = h('select', { 'aria-label': 'Nueva categoría' }, opt('', 'Cambiar categoría a…', true),
+      h('optgroup', { label: 'Gastos' }, d.cats.filter((c) => c.kind === 'gasto' && !c.archived).map((c) => opt(c.id, c.name))),
+      h('optgroup', { label: 'Ingresos' }, d.cats.filter((c) => c.kind === 'ingreso' && !c.archived).map((c) => opt(c.id, c.name))));
+    root.append(h('div', { class: 'selbar' },
+      catSel,
+      h('button', { class: 'btn primary', type: 'button', text: 'Aplicar', disabled: !picked.length, onclick: async () => {
+        const cat = d.catById.get(catSel.value);
+        if (!cat) return setStatus('Elige una categoría.', 'warn');
+        const ok = picked.filter((m) => m.kind === cat.kind);
+        const skipped = picked.length - ok.length;
+        if (!ok.length) return setStatus(`Ninguno de los seleccionados es un ${cat.kind}.`, 'warn');
+        ui.selecting = false;
+        await saveRecords(ok.map((m) => ({ ...m, categoryId: cat.id })));
+        setStatus(`${ok.length} movimiento(s) pasaron a «${cat.name}»${skipped ? `; ${skipped} no, porque no son ${cat.kind === 'gasto' ? 'gastos' : 'ingresos'}` : ''}.`, 'ok');
+      } }),
+      h('button', { class: 'btn danger', type: 'button', text: 'Eliminar', disabled: !picked.length, onclick: async () => {
+        if (!confirm(`¿Eliminar ${picked.length} movimiento(s)? Podrás recuperarlos desde la Papelera durante ${TRASH_DAYS} días.`)) return;
+        const trash = 'del-' + crypto.randomUUID().slice(0, 8);
+        ui.selecting = false;
+        await saveRecords(picked.map((m) => ({ ...m, deleted: true, trash })));
+        setStatus(`${picked.length} movimiento(s) eliminados.`, 'ok');
+      } }),
+      h('button', { class: 'btn', type: 'button', text: 'Listo', onclick: () => { ui.selecting = false; render(); } })));
   }
 }
 
 
+
+
+// ---------- Importar extractos ----------
+let xlsxLoading = null;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  xlsxLoading ||= new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = './vendor/xlsx.full.min.js';
+    sc.onload = () => res(window.XLSX);
+    sc.onerror = () => { xlsxLoading = null; rej(new Error('No se pudo cargar el lector de Excel (¿sin conexión la primera vez?).')); };
+    document.head.append(sc);
+  });
+  return xlsxLoading;
+}
+
+async function readStatement(file) {
+  const buf = await file.arrayBuffer();
+  if (/\.(xlsx|xls|xlsm|ods)$/i.test(file.name)) {
+    const XLSX = await loadXlsx();
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    let best = [];
+    for (const name of wb.SheetNames) {
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: '' })
+        .map((r) => r.map((c) => (typeof c === 'string' ? c.trim() : c)))
+        .filter((r) => r.some((c) => c !== ''));
+      if (rows.length > best.length) best = rows;
+    }
+    return best;
+  }
+  return parseCSV(decodeBytes(buf));
+}
+
+const colLetter = (i) => String.fromCharCode(65 + (i % 26));
+const headSig = (rows, i) => (rows[i] || []).map((c) => String(c).toLowerCase().trim()).join('|');
+
+function openImport(preset = {}) {
+  const d = ui.data;
+  const accs = d.accounts.filter((a) => !a.archived);
+  if (!accs.length) { setStatus('Primero crea una cuenta.', 'warn'); return; }
+  const st = { accountId: preset.accountId || (accs.some((a) => a.id === ui.filterAccount) ? ui.filterAccount : accs[0].id) };
+  const err = h('p', { class: 'error', hidden: true });
+  const fileIn = h('input', { type: 'file', accept: '.csv,.txt,.xlsx,.xls,.xlsm,.ods,text/csv', 'aria-label': 'Archivo del extracto' });
+  const accSel = h('select', { name: 'accountId', onchange: (e) => { st.accountId = e.target.value; } }, accs.map((a) => opt(a.id, `${a.name} (${a.currency})`, a.id === st.accountId)));
+  fileIn.addEventListener('change', async () => {
+    const f = fileIn.files && fileIn.files[0];
+    if (!f) return;
+    err.hidden = true;
+    try {
+      const rows = await readStatement(f);
+      if (rows.length < 2) throw new Error('El archivo no tiene filas para importar.');
+      st.rows = rows;
+      st.fileName = f.name;
+      const prof = d.importProfiles.get(st.accountId);
+      const useProf = !!(prof && prof.map && headSig(rows, prof.map.headerRow) === prof.sig);
+      st.map = useProf ? { ...prof.map } : guessMapping(rows);
+      st.fromProfile = useProf;
+      importMapping(st);
+    } catch (e) {
+      err.textContent = e.message || String(e);
+      err.hidden = false;
+    }
+  });
+  openSheet(h('div', { class: 'form' },
+    h('h3', { text: 'Importar extracto' }),
+    h('p', { class: 'hint', text: 'Descarga los movimientos desde la app o la página de tu banco en CSV o Excel (.xlsx o .xls). El archivo se lee solo en este dispositivo: no se sube a ningún lado.' }),
+    h('label', {}, 'Cuenta a la que pertenece el extracto', accSel),
+    h('label', {}, 'Archivo', fileIn),
+    err,
+    h('div', { class: 'row end' }, h('button', { class: 'btn', type: 'button', text: 'Cancelar', onclick: closeSheet }))));
+}
+
+function importMapping(st) {
+  const d = ui.data;
+  const acc = d.accById.get(st.accountId);
+  const cur = acc.currency;
+  const rows = st.rows;
+  const m = st.map;
+  const head = rows[m.headerRow] || [];
+  const width = Math.max(...rows.slice(m.headerRow, m.headerRow + 10).map((r) => r.length));
+  const colOpts = (cur0, allowNone) => [
+    allowNone && opt('-1', '(ninguna)', cur0 < 0),
+    ...Array.from({ length: width }, (_, i) => opt(String(i), `${colLetter(i)} · ${String(head[i] ?? '').slice(0, 28) || 'sin título'}`, i === cur0)),
+  ];
+  const set = (k, v) => { m[k] = v; importMapping(st); };
+  const seg = (opts, curv, onpick) => h('div', { class: 'seg', style: `grid-template-columns:repeat(${opts.length},1fr)` },
+    opts.map(([k, label]) => h('button', { type: 'button', class: k === curv ? 'on' : '', text: label, onclick: () => onpick(k) })));
+  const preview = buildRows(rows, m, cur).slice(0, 4);
+  const table = h('div', { class: 'imp-table' }, h('table', {},
+    h('tbody', {}, rows.slice(m.headerRow, m.headerRow + 5).map((r, ri) => h('tr', { class: ri === 0 ? 'head' : '' },
+      Array.from({ length: width }, (_, i) => h(ri === 0 ? 'th' : 'td', { text: String(r[i] ?? '').slice(0, 24) })))))));
+  openSheet(h('div', { class: 'form' },
+    h('h3', { text: `Columnas de ${st.fileName}` }),
+    h('p', { class: 'hint', text: st.fromProfile ? `Usé las mismas columnas de la última vez para ${acc.name}. Revisa que la vista previa esté bien.` : 'Adiviné las columnas; corrige lo que haga falta mirando la vista previa de abajo.' }),
+    table,
+    h('label', {}, 'Fila con los títulos',
+      h('select', { onchange: (e) => { st.map = { ...guessMapping(rows, Number(e.target.value)) }; importMapping(st); } },
+        rows.slice(0, 15).map((r, i) => opt(String(i), `Fila ${i + 1}: ${r.filter((c) => c !== '').join(' · ').slice(0, 40)}`, i === m.headerRow)))),
+    h('label', {}, 'Fecha', h('select', { onchange: (e) => set('date', Number(e.target.value)) }, colOpts(m.date))),
+    h('label', {}, 'Formato de fecha', h('select', { onchange: (e) => set('dateOrder', e.target.value) },
+      opt('dmy', 'Día/mes/año (31/12/2026)', m.dateOrder === 'dmy'), opt('mdy', 'Mes/día/año (12/31/2026)', m.dateOrder === 'mdy'))),
+    h('label', {}, 'Descripción', h('select', { onchange: (e) => set('desc', Number(e.target.value)) }, colOpts(m.desc, true))),
+    h('div', { class: 'section-title', text: 'Montos' }),
+    seg([['single', 'Una columna'], ['split', 'Cargos y abonos']], m.mode, (k) => set('mode', k)),
+    m.mode === 'single'
+      ? [h('label', {}, 'Columna del monto', h('select', { onchange: (e) => set('amount', Number(e.target.value)) }, colOpts(m.amount))),
+         h('div', { class: 'section-title', text: 'Los gastos aparecen como' }),
+         seg([['neg', 'Negativos (−)'], ['pos', 'Positivos']], m.sign, (k) => set('sign', k))]
+      : [h('label', {}, 'Columna de cargos (gastos)', h('select', { onchange: (e) => set('debit', Number(e.target.value)) }, colOpts(m.debit))),
+         h('label', {}, 'Columna de abonos (ingresos)', h('select', { onchange: (e) => set('credit', Number(e.target.value)) }, colOpts(m.credit)))],
+    h('div', { class: 'section-title', text: 'Así se va a leer' }),
+    preview.length
+      ? h('div', { class: 'list' }, preview.map((r) => h('div', { class: 'item' },
+          h('div', { class: 'main' }, h('div', { class: 'title', text: r.desc || '(sin descripción)' }), h('div', { class: 'sub', text: shortDate(r.date) })),
+          h('div', { class: 'amt ' + (r.kind === 'gasto' ? 'neg' : 'pos'), text: (r.kind === 'gasto' ? '−' : '+') + formatMoney(r.amount, cur) }))))
+      : h('p', { class: 'error', text: 'Con estas columnas no se reconoce ninguna fila: revisa la fecha y el monto.' }),
+    h('div', { class: 'row between wrap' },
+      h('button', { class: 'btn', type: 'button', text: '‹ Otro archivo', onclick: () => openImport({ accountId: st.accountId }) }),
+      h('button', { class: 'btn primary', type: 'button', text: 'Continuar', disabled: !preview.length, onclick: () => importReview(st) }))));
+}
+
+function importReview(st) {
+  const d = ui.data;
+  const acc = d.accById.get(st.accountId);
+  const cur = acc.currency;
+  const built = markDuplicates(buildRows(st.rows, st.map, cur), d.realMovs, acc.id);
+  const catOk = (id, kind) => { const c = d.catById.get(id); return c && c.kind === kind && !c.archived; };
+  st.items = built.map((r, i) => {
+    const rule = ruleFor(r.desc, d.rules);
+    return { ...r, i, key: merchantKey(r.desc), include: !r.duplicate && !r.maybeTransfer, categoryId: rule && catOk(rule.categoryId, r.kind) ? rule.categoryId : '', manual: false };
+  });
+  const dups = st.items.filter((r) => r.duplicate).length;
+  const transf = st.items.filter((r) => r.maybeTransfer && !r.duplicate).length;
+  const dates = st.items.map((r) => r.date).sort();
+  const countEl = h('strong');
+  const goBtn = h('button', { class: 'btn primary', type: 'button' });
+  const refresh = () => {
+    const n = st.items.filter((r) => r.include).length;
+    countEl.textContent = `${n} de ${st.items.length} seleccionados`;
+    goBtn.textContent = `Importar ${n}`;
+    goBtn.disabled = !n;
+  };
+  const catSelect = (r) => h('select', { 'data-key': r.key, 'data-kind': r.kind, 'aria-label': 'Categoría', onchange: (e) => {
+    r.categoryId = e.target.value;
+    r.manual = true;
+    // El mismo comercio en otras filas toma la misma categoría (si no la cambiaste a mano).
+    if (r.key) for (const o of st.items) if (o !== r && !o.manual && o.key === r.key && o.kind === r.kind) {
+      o.categoryId = r.categoryId;
+      const sel = list.querySelector(`select[data-row="${o.i}"]`);
+      if (sel) sel.value = o.categoryId;
+    }
+  } }, opt('', 'Sin categoría', !r.categoryId), d.cats.filter((c) => c.kind === r.kind && !c.archived).map((c) => opt(c.id, c.name, c.id === r.categoryId)));
+  const rowEl = (r) => {
+    const sel = catSelect(r);
+    sel.setAttribute('data-row', String(r.i));
+    const box = h('input', { type: 'checkbox', checked: r.include, 'aria-label': `Importar ${r.desc}`, onchange: (e) => { r.include = e.target.checked; refresh(); } });
+    const kindSel = h('select', { 'aria-label': 'Tipo', onchange: (e) => {
+      r.kind = e.target.value;
+      r.categoryId = '';
+      r.manual = false;
+      const fresh = rowEl(r);
+      wrap.replaceWith(fresh);
+    } }, opt('gasto', 'Gasto', r.kind === 'gasto'), opt('ingreso', 'Ingreso', r.kind === 'ingreso'));
+    const wrap = h('div', { class: 'imp-row' + (r.duplicate ? ' dup' : '') },
+      h('label', { class: 'imp-check' }, box),
+      h('div', { class: 'imp-main' },
+        h('div', { class: 'row between' },
+          h('span', { class: 'title', text: r.desc || '(sin descripción)' }),
+          h('span', { class: 'amt ' + (r.kind === 'gasto' ? 'neg' : 'pos'), text: (r.kind === 'gasto' ? '−' : '+') + formatMoney(r.amount, cur) })),
+        h('div', { class: 'sub' }, shortDate(r.date),
+          r.duplicate && h('span', { class: 'tag', text: 'Ya registrado' }),
+          r.maybeTransfer && h('span', { class: 'tag', text: '¿Pago o transferencia?' })),
+        h('div', { class: 'imp-sel' }, kindSel, sel)));
+    return wrap;
+  };
+  const list = h('div', { class: 'imp-list' }, st.items.map(rowEl));
+  refresh();
+  goBtn.onclick = () => doImport(st);
+  openSheet(h('div', { class: 'form' },
+    h('h3', { text: `Revisar ${st.items.length} movimientos` }),
+    h('p', { class: 'hint', text: `${acc.name} · del ${shortDate(dates[0])} al ${shortDate(dates.at(-1))}.` +
+      (dups ? ` ${dups} ya estaban registrados y quedaron sin marcar.` : '') +
+      (transf ? ` ${transf} parecen pagos o transferencias entre tus cuentas: quedaron sin marcar para que no se dupliquen (márcalos si de verdad son gastos o ingresos).` : '') +
+      ' La categoría que elijas para un comercio se aplica a sus otras filas y se recuerda para la próxima vez.' }),
+    list,
+    h('div', { class: 'selbar' }, countEl, h('span', { style: 'flex:1' }),
+      h('button', { class: 'btn', type: 'button', text: '‹ Columnas', onclick: () => importMapping(st) }), goBtn)));
+}
+
+async function doImport(st) {
+  const d = ui.data;
+  const acc = d.accById.get(st.accountId);
+  const importId = 'imp-' + crypto.randomUUID().slice(0, 8);
+  const now = Date.now();
+  const chosen = st.items.filter((r) => r.include);
+  const recs = chosen.map((r, k) => ({
+    col: 'movs', id: crypto.randomUUID(), kind: r.kind, date: r.date, accountId: acc.id, amount: r.amount,
+    categoryId: r.categoryId, note: r.desc.slice(0, 120), createdAt: now + k, deleted: false, importId,
+  }));
+  // Reglas aprendidas: cada comercio al que le pusiste categoría a mano.
+  const rules = new Map();
+  for (const r of st.items) if (r.manual && r.categoryId && r.key && r.key.length >= 3) rules.set(r.key, r.categoryId);
+  const ruleRecs = [...rules].map(([pattern, categoryId]) => ({ col: 'reglas', id: 'r-' + pattern.replace(/\s+/g, '-').slice(0, 60), pattern, categoryId, deleted: false }));
+  const prof = { col: 'config', id: 'import-' + acc.id, map: st.map, sig: headSig(st.rows, st.map.headerRow), deleted: false };
+  closeSheet();
+  await saveRecords([...recs, ...ruleRecs, prof]);
+  const dates = chosen.map((r) => r.date).sort();
+  openSheet(h('div', { class: 'form' },
+    h('h3', { text: 'Importación lista' }),
+    h('p', { text: `Se agregaron ${recs.length} movimientos a ${acc.name}${ruleRecs.length ? ` y se guardaron ${ruleRecs.length} regla(s) de categoría` : ''}.` }),
+    h('div', { class: 'row between wrap' },
+      h('button', { class: 'btn danger', type: 'button', text: 'Deshacer importación', onclick: async () => {
+        const mine = (await store.getAllRecords()).filter((r) => r.col === 'movs' && r.importId === importId && !r.deleted);
+        closeSheet();
+        await saveRecords(mine.map((r) => ({ ...r, deleted: true, trash: importId })));
+        setStatus(`Importación deshecha: ${mine.length} movimientos quitados (quedan en la Papelera).`, 'ok');
+      } }),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', type: 'button', text: 'Ver en Movimientos', onclick: () => {
+          closeSheet();
+          Object.assign(ui, { q: '', fKind: '', fCat: '', filterAccount: acc.id, period: 'rango', from: dates[0] || '', to: dates.at(-1) || '', showFilters: true });
+          showTab('movs');
+        } }),
+        h('button', { class: 'btn primary', type: 'button', text: 'Cerrar', onclick: closeSheet })))));
+}
+
+function renderRules(d) {
+  const root = $('#rules-box');
+  if (!root) return;
+  if (!d.rules.length) { root.replaceChildren(h('p', { class: 'hint', text: 'Aún no hay reglas. Se crean solas cuando eliges la categoría de un comercio al importar un extracto.' })); return; }
+  root.replaceChildren(h('div', { class: 'list' }, [...d.rules].sort((a, b) => a.pattern.localeCompare(b.pattern)).map((r) => {
+    const c = d.catById.get(r.categoryId);
+    return h('div', { class: 'item' },
+      h('div', { class: 'main' }, h('div', { class: 'title', text: `«${r.pattern}»` }), h('div', { class: 'sub', text: `→ ${c ? c.name : 'categoría eliminada'}` })),
+      h('button', { class: 'btn', type: 'button', text: 'Quitar', onclick: () => saveRecord({ ...r, deleted: true }) }));
+  })));
+}
 
 // ---------- Papelera ----------
 function trashLabel(r, d) {
@@ -1713,6 +2093,8 @@ async function openMovForm(existing, preset) {
         note: existing.note || '',
         amount: toInput(existing.amount, curOf(existing.accountId)),
         toAmount: existing.kind === 'transferencia' ? toInput(existing.toAmount ?? existing.amount, curOf(existing.toAccountId)) : '',
+        cuotasN: existing.cuotas ? String(existing.cuotas.n) : '1',
+        cuotasRate: existing.cuotas && existing.cuotas.rate ? String(+(existing.cuotas.rate * 100).toFixed(4)).replace('.', ',') : '',
       }
     : {
         kind: 'gasto',
@@ -1723,6 +2105,8 @@ async function openMovForm(existing, preset) {
         note: '',
         amount: '',
         toAmount: '',
+        cuotasN: '1',
+        cuotasRate: '',
       };
   if (!existing && preset) {
     Object.assign(s, preset);
@@ -1740,7 +2124,7 @@ async function openMovForm(existing, preset) {
   const read = () => {
     const f = body.querySelector('form');
     if (!f) return;
-    for (const k of ['amount', 'toAmount', 'accountId', 'toAccountId', 'categoryId', 'date', 'note']) {
+    for (const k of ['amount', 'toAmount', 'accountId', 'toAccountId', 'categoryId', 'date', 'note', 'cuotasN', 'cuotasRate']) {
       if (f.elements[k]) s[k] = f.elements[k].value;
     }
   };
@@ -1782,6 +2166,13 @@ async function openMovForm(existing, preset) {
       delete rec.toAccountId;
       delete rec.toAmount;
     }
+    const isCard = d.accById.get(s.accountId) && d.accById.get(s.accountId).type === 'credito';
+    const n = Number(s.cuotasN) || 1;
+    if (s.kind === 'gasto' && isCard && n > 1) {
+      const pct = s.cuotasRate.trim() ? parseQty(s.cuotasRate) : 0;
+      if (pct === null || pct < 0 || pct > 10) return fail('El interés mensual debe estar entre 0 y 10 % (por ejemplo 1,89).');
+      rec.cuotas = { n, rate: pct / 100 };
+    } else delete rec.cuotas;
     await store.setMeta('lastAccount', s.accountId);
     closeSheet();
     await saveRecord(rec);
@@ -1823,6 +2214,35 @@ async function openMovForm(existing, preset) {
         h('select', { name: 'categoryId' },
           opt('', 'Sin categoría', !s.categoryId),
           cats.map((c) => opt(c.id, c.name, c.id === s.categoryId)))));
+    }
+
+    const acc = d.accById.get(s.accountId);
+    if (s.kind === 'gasto' && acc && acc.type === 'credito') {
+      const hint = h('p', { class: 'hint', style: 'margin:0' });
+      const showPlan = () => {
+        const f = body.querySelector('form');
+        const n = Number(f ? f.elements.cuotasN.value : s.cuotasN) || 1;
+        const rateWrap = body.querySelector('#rate-wrap');
+        if (rateWrap) rateWrap.hidden = n <= 1;
+        if (n <= 1) { hint.textContent = acc.cutDay ? `Una sola cuota: llega completa en el próximo corte (día ${acc.cutDay}).` : ''; return; }
+        const amount = parseAmount(f ? f.elements.amount.value : s.amount, cur);
+        const pct = parseQty(f ? f.elements.cuotasRate.value : s.cuotasRate) || 0;
+        if (!amount) { hint.textContent = `${n} cuotas${acc.cutDay ? `, una en cada corte (día ${acc.cutDay})` : ', una por mes'}.`; return; }
+        const plan = installmentPlan({ amount, date: (f ? f.elements.date.value : s.date) || todayStr(), cuotas: { n, rate: pct / 100 } }, acc);
+        hint.textContent = `${n} cuotas de ${formatMoney(plan.cuota, cur)}${pct ? ' (aprox.)' : ''} · primera el ${shortDate(plan.rows[0].cut)} · total ${formatMoney(plan.total, cur)}${plan.total > amount ? ` (${formatMoney(plan.total - amount, cur)} de intereses)` : ''}.`;
+      };
+      const ns = [1, 2, 3, 4, 5, 6, 9, 12, 18, 24, 36, 48];
+      if (!ns.includes(Number(s.cuotasN))) ns.push(Number(s.cuotasN));
+      fields.push(h('label', {}, 'Cuotas',
+        h('select', { name: 'cuotasN', onchange: showPlan }, ns.sort((a, b) => a - b).map((n) => opt(String(n), n === 1 ? '1 (sin diferir)' : `${n} cuotas`, String(n) === String(s.cuotasN))))));
+      fields.push(h('label', { id: 'rate-wrap' }, 'Interés mensual (%) — déjalo vacío si es sin interés',
+        h('input', { type: 'text', name: 'cuotasRate', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Ej: 1,89', value: s.cuotasRate, oninput: showPlan })));
+      fields.push(hint);
+      queueMicrotask(() => {
+        const f = body.querySelector('form');
+        if (f) { f.elements.amount.addEventListener('input', showPlan); f.elements.date.addEventListener('change', showPlan); }
+        showPlan();
+      });
     }
 
     fields.push(h('label', {}, 'Fecha', h('input', { type: 'date', name: 'date', value: s.date, required: true })));
@@ -2064,7 +2484,7 @@ async function openAbonoForm(debtId, existing) {
 // deudas, abonos y operaciones de inversión se conservan sin cuenta asociada.
 async function deleteAccount(acc) {
   const d = ui.data;
-  const movs = d.movs.filter((m) => m.accountId === acc.id || m.toAccountId === acc.id);
+  const movs = d.realMovs.filter((m) => m.accountId === acc.id || m.toAccountId === acc.id);
   const debts = d.debts.filter((x) => x.accountId === acc.id);
   const abonos = d.abonos.filter((x) => x.accountId === acc.id);
   const ops = d.ops.filter((x) => x.accountId === acc.id);
