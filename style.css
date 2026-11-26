@@ -19,7 +19,7 @@
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #101416;
     --card: #181e21;
     --text: #e8eceb;
@@ -37,6 +37,25 @@
     --good-text: #0ca30c;
   }
 }
+:root[data-theme="dark"] {
+  --bg: #101416;
+  --card: #181e21;
+  --text: #e8eceb;
+  --muted: #93a1a6;
+  --border: #2a3338;
+  --accent: #2dd4bf;
+  --accent-text: #05211e;
+  --danger: #f97066;
+  --warn: #fdb022;
+  --ok: #47cd89;
+  --s1: #3987e5;
+  --s2: #d95926;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --good-text: #0ca30c;
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
 body {
@@ -61,7 +80,7 @@ h3 { margin: 0 0 4px; }
   padding: 10px 7px; font: inherit; font-size: .9rem; cursor: pointer; white-space: nowrap;
 }
 @media (max-width: 440px) { .tabs button { font-size: .85rem; padding: 10px 4px; } }
-@media (max-width: 380px) { .tabs button { font-size: .8rem; padding: 10px 3px; } }
+@media (max-width: 380px) { .tabs { gap: 1px; } .tabs button { font-size: .76rem; padding: 10px 2px; } }
 .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 .hint { color: var(--muted); font-size: .9rem; margin: 4px 0 12px; }
 .error { color: var(--danger); font-size: .9rem; margin: 0; }
@@ -248,3 +267,16 @@ svg [tabindex]:focus-visible { outline: 2px solid var(--accent); }
 .pc-main.pos { color: var(--ok); }
 .pc-main.neg { color: var(--danger); }
 .card.person .sub { color: var(--muted); font-size: .85rem; }
+
+/* Apariencia */
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.swatch { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); font: inherit; font-size: .9rem; cursor: pointer; }
+.swatch .dot { width: 18px; height: 18px; border-radius: 50%; background: var(--sw); flex: none; }
+.swatch.on { border-color: var(--sw); box-shadow: 0 0 0 1px var(--sw); font-weight: 600; }
+#btn-privacy svg { display: block; }
+#btn-privacy[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* Encabezado angosto: el botón de sincronizar queda solo con el ícono */
+@media (max-width: 400px) { #btn-sync .lbl { display: none; } #btn-sync { padding: 8px 12px; font-size: 1.1rem; line-height: 1; } }
+/* Modo privacidad: tampoco el color delata si un monto es positivo o negativo */
+.privado .amt.pos, .privado .amt.neg, .privado .line .pos, .privado .line .neg, .privado .pc-main.pos, .privado .pc-main.neg { color: var(--text); }

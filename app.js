@@ -1,8 +1,10 @@
 import { openStore } from './store.js';
 import { createGithub } from './github.js';
-import { runSync, exportEncrypted, importEncrypted } from './sync.js';
+import { runSync, exportEncrypted, importEncrypted, CAP_GZ } from './sync.js';
+import { decryptJson, deriveKey } from './crypto.js';
+import { trashGroups, purgeable, restorePlan, versionSummary, TRASH_DAYS } from './trash.js';
 import { SyncError } from './errors.js';
-import { parseAmount, formatMoney, toInput, dec, CURRENCIES } from './money.js';
+import { parseAmount, formatMoney, toInput, dec, CURRENCIES, setMoneyHidden, moneyHidden } from './money.js';
 import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
   debtFlows, debtRemaining, debtIsDone, debtTotals, debtsByPerson, personKey, addDays, cardCycle,
@@ -14,7 +16,7 @@ import { fetchPrices, fetchTrm } from './prices.js';
 import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTip } from './charts.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.8.0 (eliminar cuentas, vista)';
+const VERSION = '0.9.0 (Fase 5)';
 const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
@@ -177,6 +179,28 @@ const saveRecord = (r) => saveRecords([r]);
 
 // Categorías iniciales con id fijo y updatedAt 0: cualquier edición real las supera
 // y dos dispositivos no las duplican.
+// Cada dispositivo deja constancia de su versión y de que entiende el formato comprimido.
+async function registerDevice() {
+  const all = await store.getAllRecords();
+  const me = all.find((r) => r.col === 'dispositivos' && r.id === deviceId);
+  if (me && me.version === VERSION && Date.now() - (me.seenAt || 0) < 7 * 864e5) return;
+  const ua = navigator.userAgent;
+  const os = /Android/i.test(ua) ? 'Android' : /iPhone|iPad/i.test(ua) ? 'iPhone' : /Windows/i.test(ua) ? 'Windows' : /Mac/i.test(ua) ? 'Mac' : /Linux/i.test(ua) ? 'Linux' : 'Otro';
+  const br = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Navegador';
+  const rec = { col: 'dispositivos', id: deviceId, caps: [CAP_GZ], version: VERSION, name: `${os} · ${br}`, seenAt: Date.now(), deleted: false };
+  rec.updatedAt = Date.now();
+  rec.dev = deviceId;
+  await store.putRecords([rec]);
+}
+
+// Quita los datos de lo que lleva más de 30 días en la papelera (o de todo, al vaciarla).
+async function purgeTrash(everything) {
+  const list = purgeable(await store.getAllRecords(), Date.now(), everything);
+  if (!list.length) return;
+  if (everything) await saveRecords(list);
+  else await store.putRecords(list);
+}
+
 async function seedDefaults() {
   if (await store.getMeta('seededCats')) return;
   const all = await store.getAllRecords();
@@ -197,6 +221,9 @@ async function loadData() {
   const debtIds = new Set(debts.map((x) => x.id));
   const abonos = live(all, 'abonos').filter((a) => debtIds.has(a.debtId));
   const ops = live(all, 'inv');
+  const trash = trashGroups(all);
+  const allAccounts = new Map(all.filter((r) => r.col === 'cuentas').map((r) => [r.id, r]));
+  const compactRec = all.find((r) => r.col === 'config' && r.id === 'compactacion' && !r.deleted) || null;
   const prices = new Map(live(all, 'precios').map((r) => [r.symbol, r]));
   const flows = [...debtFlows(debts, abonos), ...invFlows(ops)];
   const fx = prices.get('USDCOP') || null;
@@ -221,6 +248,9 @@ async function loadData() {
     flows,
     ops,
     prices,
+    trash,
+    allAccounts,
+    compactRec,
     fx,
     infl,
     inv,
@@ -253,9 +283,50 @@ function getView() {
   try { v = JSON.parse(localStorage.getItem(VIEW_KEY)); } catch { /* sin almacenamiento */ }
   return { hiddenTabs: [], hiddenSections: [], hiddenCurrencies: [], ...(v || {}) };
 }
+// Apariencia: tema (auto/claro/oscuro) y paleta del color principal. Contrastes revisados (≥ 4,5:1)
+// para texto sobre el botón y para el color sobre el fondo, en claro y en oscuro.
+const PALETTES = {
+  verde: { name: 'Verde', light: ['#0f766e', '#ffffff'], dark: ['#2dd4bf', '#05211e'] },
+  azul: { name: 'Azul', light: ['#1d4ed8', '#ffffff'], dark: ['#60a5fa', '#0b1b33'] },
+  morado: { name: 'Morado', light: ['#6d28d9', '#ffffff'], dark: ['#a78bfa', '#1e1036'] },
+  frambuesa: { name: 'Frambuesa', light: ['#be185d', '#ffffff'], dark: ['#f472b6', '#3b0a1f'] },
+  naranja: { name: 'Naranja', light: ['#c2410c', '#ffffff'], dark: ['#fb923c', '#2a1205'] },
+  grafito: { name: 'Grafito', light: ['#334155', '#ffffff'], dark: ['#cbd5e1', '#0f172a'] },
+};
+const darkMQ = matchMedia('(prefers-color-scheme: dark)');
+function applyTheme() {
+  const v = getView();
+  const root = document.documentElement;
+  if (v.theme === 'light' || v.theme === 'dark') root.dataset.theme = v.theme;
+  else delete root.dataset.theme;
+  const dark = v.theme === 'dark' || (v.theme !== 'light' && darkMQ.matches);
+  const p = PALETTES[v.palette] || PALETTES.verde;
+  const [acc, accText] = dark ? p.dark : p.light;
+  root.style.setProperty('--accent', acc);
+  root.style.setProperty('--accent-text', accText);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = dark ? '#101416' : acc;
+}
+darkMQ.addEventListener('change', () => { applyTheme(); if (ui.tab === 'reportes') render(); });
+
+const EYE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.6 10.6 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2M6.6 6.6A17.4 17.4 0 0 0 2 12s3.5 7 10 7a9.6 9.6 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+function setPrivacy(on) {
+  setMoneyHidden(on);
+  const b = $('#btn-privacy');
+  b.innerHTML = on ? EYE_OFF : EYE;
+  b.setAttribute('aria-pressed', String(on));
+  b.setAttribute('aria-label', on ? 'Mostrar montos' : 'Ocultar montos');
+  b.title = on ? 'Mostrar montos' : 'Ocultar montos';
+  document.documentElement.classList.toggle('privado', on);
+  hideTip();
+  return render();
+}
+
 function setView(patch) {
   const v = { ...getView(), ...patch };
   try { localStorage.setItem(VIEW_KEY, JSON.stringify(v)); } catch { /* sin almacenamiento */ }
+  applyTheme();
   return render();
 }
 const toggleIn = (list, key, on) => (on ? list.filter((x) => x !== key) : [...new Set([...list, key])]);
@@ -265,7 +336,19 @@ function renderViewPrefs() {
   if (!root) return;
   const v = getView();
   const box = (label, on, onchange) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: on, onchange: (e) => onchange(e.target.checked) }), label);
+  const seg = (opts, cur, onpick) => h('div', { class: 'seg', role: 'group', style: `grid-template-columns:repeat(${opts.length},1fr)` },
+    opts.map(([k, label]) => h('button', { type: 'button', class: k === cur ? 'on' : '', 'aria-pressed': String(k === cur), text: label, onclick: () => onpick(k) })));
+  const pal = v.palette && PALETTES[v.palette] ? v.palette : 'verde';
+  const dark = v.theme === 'dark' || (v.theme !== 'light' && darkMQ.matches);
   root.replaceChildren(...[
+    h('div', { class: 'section-title', text: 'Tema' }),
+    seg([['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro']], v.theme || 'auto', (k) => setView({ theme: k })),
+    h('div', { class: 'section-title', text: 'Color' }),
+    h('div', { class: 'swatches', role: 'radiogroup', 'aria-label': 'Color principal' }, Object.entries(PALETTES).map(([k, p]) =>
+      h('button', { type: 'button', class: 'swatch' + (k === pal ? ' on' : ''), role: 'radio', 'aria-checked': String(k === pal), title: p.name, 'aria-label': p.name,
+        style: `--sw:${dark ? p.dark[0] : p.light[0]}`, onclick: () => setView({ palette: k }) }, h('span', { class: 'dot' }), h('span', { class: 'nm', text: p.name })))),
+    h('div', { class: 'section-title', text: 'Privacidad' }),
+    box('Abrir la app con los montos ocultos', !!v.privacyStart, (on) => setView({ privacyStart: on })),
     h('div', { class: 'section-title', text: 'Pestañas' }),
     TOGGLE_TABS.map(([k, label]) => box(label, !v.hiddenTabs.includes(k), (on) => setView({ hiddenTabs: toggleIn(v.hiddenTabs, k, on) }))),
     h('div', { class: 'section-title', text: 'Resumen' }),
@@ -291,7 +374,7 @@ async function render() {
   else if (ui.tab === 'inv') renderInv(ui.data);
   else if (ui.tab === 'deudas') renderDeudas(ui.data);
   else if (ui.tab === 'reportes') renderReportes(ui.data);
-  else { renderCategories(ui.data); renderViewPrefs(); }
+  else { renderCategories(ui.data); renderViewPrefs(); renderHistoryBox(); }
 }
 
 async function showTab(name) {
@@ -658,6 +741,165 @@ function renderMovs(d) {
   }
 }
 
+
+
+// ---------- Papelera ----------
+function trashLabel(r, d) {
+  const acc = d.allAccounts.get(r.accountId);
+  const cur = r.currency || (acc ? acc.currency : 'COP');
+  if (r.col === 'cuentas') return `Cuenta «${r.name}»`;
+  if (r.col === 'deudas') return `${r.dir === 'debo' ? 'Le debes a' : 'Te debe'} ${r.person}: ${formatMoney(r.amount, r.currency)}`;
+  if (r.col === 'metas') { const a = d.allAccounts.get(r.accountId); return `Meta de ahorro «${(r.name && r.name.trim()) || (a ? a.name : 'cajita')}»`; }
+  if (r.col === 'inv') return `${r.kind === 'compra' ? 'Compra' : r.kind === 'venta' ? 'Venta' : 'Dividendo'} ${r.symbol} · ${formatMoney(r.amount, cur)}`;
+  const kind = r.kind === 'gasto' ? 'Gasto' : r.kind === 'ingreso' ? 'Ingreso' : 'Transferencia';
+  const cat = r.categoryId && d.catById.get(r.categoryId);
+  return `${kind} ${formatMoney(r.amount, cur)}${r.note ? ' · ' + r.note : cat ? ' · ' + cat.name : ''} · ${shortDate(r.date)}`;
+}
+
+async function restoreTrash(g) {
+  const all = await store.getAllRecords();
+  const relink = g.main.col === 'cuentas'
+    ? all.filter((r) => !r.deleted && r.trash === g.key && r.prevAccountId === g.main.id && !r.accountId).map((r) => ({ ...r, accountId: r.prevAccountId, prevAccountId: undefined, trash: undefined }))
+    : [];
+  await saveRecords([...g.items.map((r) => ({ ...r, deleted: false, trash: undefined })), ...relink]);
+}
+
+function openTrash() {
+  const d = ui.data;
+  const list = d.trash;
+  openSheet(h('div', { class: 'form' },
+    h('h3', { text: 'Papelera' }),
+    h('p', { class: 'hint', text: `Lo que eliminas se puede recuperar durante ${TRASH_DAYS} días; después se borra del todo.` }),
+    list.length
+      ? h('div', { class: 'list' }, list.map((g) => {
+          const extra = g.items.length - 1;
+          return h('div', { class: 'item' },
+            h('div', { class: 'main' },
+              h('div', { class: 'title', text: trashLabel(g.main, d) }),
+              h('div', { class: 'sub', text: `Eliminado ${timeAgo(g.deletedAt)}${extra > 0 ? ` · junto con ${extra} registro(s) más` : ''}` })),
+            h('button', { class: 'btn', type: 'button', text: 'Recuperar', onclick: async () => { await restoreTrash(g); openTrash(); } }));
+        }))
+      : h('p', { class: 'hint', text: 'La papelera está vacía.' }),
+    h('div', { class: 'row between wrap' },
+      list.length ? h('button', { class: 'btn danger', type: 'button', text: 'Vaciar papelera', onclick: async () => {
+        if (!confirm('¿Borrar del todo lo que hay en la papelera? No se podrá recuperar (salvo restaurando una versión anterior).')) return;
+        await purgeTrash(true);
+        openTrash();
+      } }) : h('span'),
+      h('button', { class: 'btn', type: 'button', text: 'Cerrar', onclick: closeSheet }))));
+}
+
+// ---------- Versiones anteriores ----------
+const fmtStamp = (iso) => new Intl.DateTimeFormat('es-CO', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
+
+async function openVersions() {
+  if (!isConfigured()) { setStatus('Configura primero la sincronización.', 'warn'); return; }
+  const gh = makeGh();
+  const box = h('div', { class: 'list' });
+  const more = h('button', { class: 'btn', type: 'button', text: 'Ver más antiguas', hidden: true });
+  const msg = h('p', { class: 'hint', text: 'Cargando versiones…' });
+  let page = 1;
+  async function load() {
+    more.disabled = true;
+    try {
+      const list = await gh.listVersions(page);
+      msg.textContent = page === 1 && !list.length ? 'Todavía no hay versiones guardadas.' : 'Cada sincronización guarda una versión. Se conservan todas las de los últimos 2 días y una por día hasta 90 días.';
+      for (const v of list) {
+        box.append(h('button', { type: 'button', class: 'item', onclick: () => openVersion(gh, v) },
+          h('div', { class: 'main' }, h('div', { class: 'title', text: fmtStamp(v.date) }), h('div', { class: 'sub', text: timeAgo(Date.parse(v.date)) })),
+          h('div', { class: 'amt', text: 'Ver ›' })));
+      }
+      more.hidden = list.length < 100;
+      page += 1;
+    } catch (e) {
+      msg.textContent = errorMessage(e);
+    } finally {
+      more.disabled = false;
+    }
+  }
+  more.onclick = load;
+  openSheet(h('div', { class: 'form' }, h('h3', { text: 'Versiones anteriores' }), msg, box, more,
+    h('div', { class: 'row end' }, h('button', { class: 'btn', type: 'button', text: 'Cerrar', onclick: closeSheet }))));
+  load();
+}
+
+async function keyFor(file) {
+  const cached = await store.getMeta('syncKey');
+  if (cached && cached.salt === file.salt && cached.iter === file.iter) return cached.key;
+  const p = await askPassphrase({ isNew: false });
+  if (!p) throw new SyncError('CANCELLED');
+  return deriveKey(p, file.salt, file.iter);
+}
+
+async function openVersion(gh, v) {
+  const body = h('div', { class: 'form' }, h('h3', { text: fmtStamp(v.date) }), h('p', { class: 'hint', text: 'Descargando y descifrando…' }));
+  openSheet(body);
+  let records;
+  try {
+    const got = await gh.get(v.sha);
+    const file = JSON.parse(got.text);
+    records = (await decryptJson(await keyFor(file), file)).records || [];
+  } catch (e) {
+    if (e.code === 'CANCELLED') return openVersions();
+    body.replaceChildren(h('h3', { text: fmtStamp(v.date) }), h('p', { class: 'error', text: errorMessage(e) }),
+      h('div', { class: 'row end' }, h('button', { class: 'btn', type: 'button', text: 'Volver', onclick: openVersions })));
+    return;
+  }
+  const then = versionSummary(records);
+  const now = versionSummary(await store.getAllRecords());
+  const row = (label, k) => h('div', { class: 'line' }, h('span', { text: label }),
+    h('span', { text: `${then[k]}${then[k] !== now[k] ? `  (hoy ${now[k]})` : ''}` }));
+  body.replaceChildren(
+    h('h3', { text: fmtStamp(v.date) }),
+    h('div', { class: 'card' },
+      row('Movimientos', 'movs'), row('Cuentas', 'cuentas'), row('Deudas', 'deudas'), row('Operaciones de inversión', 'inv'), row('Metas de ahorro', 'metas')),
+    h('p', { class: 'hint', text: 'Restaurar deja tus datos exactamente como estaban en esta versión, en todos tus dispositivos. Lo de hoy no se pierde: queda como otra versión en esta misma lista, por si quieres volver.' }),
+    h('div', { class: 'row between wrap' },
+      h('button', { class: 'btn', type: 'button', text: '‹ Volver', onclick: openVersions }),
+      h('button', { class: 'btn primary', type: 'button', text: 'Restaurar esta versión', onclick: async () => {
+        if (!confirm(`¿Dejar tus datos como estaban el ${fmtStamp(v.date)}?`)) return;
+        closeSheet();
+        await doSync(false); // primero se guarda lo de hoy como versión
+        await saveRecords(restorePlan(await store.getAllRecords(), records));
+        setStatus(`Datos restaurados a la versión del ${fmtStamp(v.date)}.`, 'ok');
+      } })));
+}
+
+function renderHistoryBox() {
+  const root = $('#history-box');
+  if (!root) return;
+  const d = ui.data;
+  const c = d.compactRec;
+  const size = h('span', { class: 'hint', text: '' });
+  const note = h('strong', { text: ui.histMsg || '' });
+  root.replaceChildren(
+    h('div', { class: 'row wrap' },
+      h('button', { class: 'btn', type: 'button', text: `Papelera (${d.trash.length})`, onclick: openTrash }),
+      h('button', { class: 'btn', type: 'button', text: 'Versiones anteriores', onclick: openVersions })),
+    h('p', { class: 'hint', style: 'margin-top:10px' },
+      c ? `Última limpieza del historial ${timeAgo(c.at)} (${c.before} → ${c.after} versiones). ` : 'El historial se limpia solo cada 30 días. ',
+      note,
+      size,
+      isConfigured() && h('button', { class: 'link-btn', type: 'button', text: 'Limpiar ahora', onclick: async (ev) => {
+        ev.target.disabled = true;
+        note.textContent = 'Limpiando… ';
+        try {
+          const r = await maybeCompact(makeGh(), true);
+          ui.histMsg = r && r.raced ? 'Otro dispositivo estaba subiendo cambios; intenta de nuevo. '
+            : r && r.changed ? `Listo: ${r.before} → ${r.after} versiones. ` : 'No había versiones viejas que limpiar. ';
+        } catch (e) {
+          ui.histMsg = errorMessage(e) + ' ';
+        }
+        await render();
+        setTimeout(() => { ui.histMsg = ''; }, 0);
+      } })));
+  if (isConfigured()) {
+    makeGh().repoSizeKB().then((kb) => {
+      if (size.textContent) return;
+      size.textContent = `Tamaño del repositorio de datos: ${kb < 1024 ? kb + ' KB' : (kb / 1024).toFixed(1).replace('.', ',') + ' MB'}. `;
+    }).catch(() => {});
+  }
+}
 
 // ---------- Inversiones ----------
 const getPxKey = () => { try { return localStorage.getItem(PX_KEY) || ''; } catch { return ''; } };
@@ -1831,17 +2073,19 @@ async function deleteAccount(acc) {
   if (movs.length) lines.push(`\nSe eliminarán también sus ${movs.length} movimiento(s), incluidas las transferencias que la tocan. Los totales y reportes cambiarán.`);
   if (debts.length + abonos.length + ops.length) lines.push(`\nLas deudas, abonos y operaciones de inversión que usaban esta cuenta se conservan, pero quedan sin cuenta asociada.`);
   if (goals.length) lines.push('\nTambién se elimina su meta de ahorro.');
-  if (movs.length) lines.push('\nSi solo quieres ocultarla, mejor márcala como archivada. Esto no se puede deshacer.');
+  lines.push(`\nPodrás recuperarla desde Ajustes → Papelera durante ${TRASH_DAYS} días.`);
   if (!confirm(lines.join(''))) return;
   closeSheet();
   if (ui.filterAccount === acc.id) ui.filterAccount = '';
+  const trash = 'del-' + crypto.randomUUID().slice(0, 8);
+  const unlink = (x) => ({ ...x, accountId: '', prevAccountId: acc.id, trash });
   await saveRecords([
-    { ...acc, deleted: true },
-    ...movs.map((m) => ({ ...m, deleted: true })),
-    ...goals.map((g) => ({ ...g, deleted: true })),
-    ...debts.map((x) => ({ ...x, accountId: '' })),
-    ...abonos.map((x) => ({ ...x, accountId: '' })),
-    ...ops.map((x) => ({ ...x, accountId: '' })),
+    { ...acc, deleted: true, trash },
+    ...movs.map((m) => ({ ...m, deleted: true, trash })),
+    ...goals.map((g) => ({ ...g, deleted: true, trash })),
+    ...debts.map(unlink),
+    ...abonos.map(unlink),
+    ...ops.map(unlink),
   ]);
 }
 
@@ -1988,8 +2232,35 @@ function openCatForm(existing) {
 }
 
 // ---------- Sincronización ----------
+function makeGh() {
+  const cfg = loadCfg();
+  return createGithub({ owner: cfg.owner, repo: cfg.repo, branch: cfg.branch || 'main', path: cfg.path || 'datos.enc.json', token: cfg.token });
+}
+
+// Limpieza automática del historial del repositorio de datos: como máximo cada 30 días.
+const COMPACT_EVERY = 30 * 864e5;
+let compacting = false;
+async function maybeCompact(gh, force = false) {
+  const d = ui.data;
+  if (compacting || !d) return null;
+  const last = d.compactRec ? d.compactRec.at : 0;
+  if (!force && Date.now() - last < COMPACT_EVERY) return null;
+  compacting = true;
+  try {
+    const r = await gh.compact({ now: Date.now() });
+    if (r.raced) return r; // otro dispositivo subió algo: se intenta en la próxima sincronización
+    await saveRecord({ col: 'config', id: 'compactacion', at: Date.now(), before: r.before, after: r.after, deleted: false });
+    return r;
+  } catch (e) {
+    if (force) throw e;
+    return null;
+  } finally {
+    compacting = false;
+  }
+}
+
 async function doSync(interactive) {
-  if (syncing) return;
+  if (syncing || compacting) return;
   if (!isConfigured()) {
     if (interactive) {
       await showTab('ajustes');
@@ -2001,14 +2272,7 @@ async function doSync(interactive) {
   $('#btn-sync').disabled = true;
   setStatus('Sincronizando…');
   try {
-    const cfg = loadCfg();
-    const gh = createGithub({
-      owner: cfg.owner,
-      repo: cfg.repo,
-      branch: cfg.branch || 'main',
-      path: cfg.path || 'datos.enc.json',
-      token: cfg.token,
-    });
+    const gh = makeGh();
     const getPassphrase = async ({ isNew }) => {
       if (!interactive) throw new SyncError('NEEDS_PASSPHRASE');
       const p = await askPassphrase({ isNew });
@@ -2018,6 +2282,7 @@ async function doSync(interactive) {
     const res = await runSync({ store, gh, getPassphrase });
     await render();
     setStatus(`Sincronizado: ${res.pulled} cambio(s) recibido(s)${res.pushed ? ', cambios subidos' : ''}.`, 'ok');
+    maybeCompact(gh);
   } catch (e) {
     if (e.code === 'NEEDS_PASSPHRASE') setStatus('Toca "Sincronizar" para ingresar la contraseña en este dispositivo.', 'warn');
     else if (e.code === 'CANCELLED') await showIdleStatus();
@@ -2065,6 +2330,7 @@ function bindUi() {
   document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
   $('#btn-sync').addEventListener('click', () => doSync(true));
   $('#fab').addEventListener('click', () => (ui.tab === 'deudas' ? openDebtForm() : ui.tab === 'inv' ? openInvForm() : openMovForm()));
+  $('#btn-privacy').addEventListener('click', () => setPrivacy(!moneyHidden()));
   $('#btn-settings').addEventListener('click', () => showTab(ui.tab === 'ajustes' ? 'resumen' : 'ajustes'));
   $('#px-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
@@ -2160,8 +2426,13 @@ async function init() {
     deviceId = crypto.randomUUID().slice(0, 8);
     await store.setMeta('deviceId', deviceId);
   }
+  applyTheme();
   await seedDefaults();
+  await registerDevice();
+  await purgeTrash(false);
   bindUi();
+  setMoneyHidden(!!getView().privacyStart);
+  setPrivacy(!!getView().privacyStart);
   fillCfgForm();
   await render();
   await showIdleStatus();

@@ -2,8 +2,9 @@
 import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 import assert from 'node:assert/strict';
-import { runSync, exportEncrypted, importEncrypted } from './sync.js';
-import { createGithub } from './github.js';
+import { runSync, exportEncrypted, importEncrypted, canCompress } from './sync.js';
+import { createGithub, pickVersions } from './github.js';
+import { encryptJson, decryptJson, deriveKey, newSalt } from './crypto.js';
 import { SyncError } from './errors.js';
 
 function memStore() {
@@ -142,5 +143,134 @@ await sync(A);
 await sync(B);
 assert.equal(gh.putCalls, before);
 ok('sin cambios no se hace ninguna subida');
+
+// 11. Compresión: ida y vuelta, y mucho más pequeño
+{
+  const salt = newSalt();
+  const key = await deriveKey('k', salt, 1000);
+  const records = Array.from({ length: 400 }, (_, i) => ({ col: 'movs', id: 'id-' + i, kind: 'gasto', amount: i * 100, note: 'Almuerzo', updatedAt: i, dev: 'd' }));
+  const plain = await encryptJson(key, salt, 1000, { records });
+  const comp = await encryptJson(key, salt, 1000, { records }, { compress: true });
+  assert.equal(comp.v, 2);
+  assert.equal(comp.z, 'gzip');
+  assert.ok(comp.data.length * 4 < plain.data.length, `comprimido ${comp.data.length} vs ${plain.data.length}`);
+  assert.deepEqual((await decryptJson(key, comp)).records, records);
+  assert.deepEqual((await decryptJson(key, plain)).records, records);
+  await assert.rejects(() => decryptJson(key, { ...comp, z: 'zstd' }), (e) => e.code === 'BAD_FILE');
+  ok('compresión antes de cifrar: lee v1 y v2, y v2 es >4 veces más pequeño');
+}
+
+// 12. Solo se comprime cuando todos los dispositivos recientes lo entienden
+{
+  const now = Date.parse('2026-11-26T12:00:00Z');
+  const day = 864e5;
+  const base = [
+    { col: 'movs', id: '1', dev: 'pc', updatedAt: now - day },
+    { col: 'movs', id: '2', dev: 'cel', updatedAt: now - 2 * day },
+    { col: 'dispositivos', id: 'pc', caps: ['gz'], dev: 'pc', updatedAt: now - day },
+  ];
+  assert.equal(canCompress(base, now), false);   // el celular aún no se actualiza
+  const both = [...base, { col: 'dispositivos', id: 'cel', caps: ['gz'], dev: 'cel', updatedAt: now }];
+  assert.equal(canCompress(both, now), true);
+  const oldCel = [base[0], base[2], { col: 'movs', id: '2', dev: 'cel', updatedAt: now - 90 * day }];
+  assert.equal(canCompress(oldCel, now), true);   // el celular no escribe hace 90 días
+  ok('formato comprimido solo cuando todos los dispositivos recientes están actualizados');
+
+  // Sincronización real: A y B registran que entienden gzip → el archivo pasa a v2 y ambos lo leen
+  const gz = fakeGithub();
+  const mk2 = (dev) => ({ dev, store: memStore(), gh: createGithub({ owner: 'o', repo: 'r', token: 't', fetchFn: gz.fetch }) });
+  const X = mk2('x'), Y = mk2('y');
+  const t0 = Date.now();
+  await X.store.putRecords([rec('x', 'n1', 'uno', t0), { col: 'dispositivos', id: 'x', caps: ['gz'], dev: 'x', updatedAt: t0 }]);
+  await sync(X);
+  await Y.store.putRecords([rec('y', 'n2', 'dos', t0 + 1)]);
+  await sync(Y);
+  const fileOf = () => JSON.parse(Buffer.from(gz.file.content, 'base64').toString('utf8'));
+  assert.equal(fileOf().v, 1, 'Y sin registrarse → sigue v1');
+  await Y.store.putRecords([{ col: 'dispositivos', id: 'y', caps: ['gz'], dev: 'y', updatedAt: t0 + 2 }]);
+  await sync(Y);
+  assert.equal(fileOf().v, 2);
+  await sync(X);
+  assert.deepEqual((await visible(X)).filter(Boolean), ['dos', 'uno']);
+  ok('sincronizando: pasa a v2 cuando el segundo dispositivo se actualiza, y ambos lo leen');
+}
+
+// 13. Qué versiones conservar al limpiar el historial
+{
+  const now = Date.parse('2026-11-26T12:00:00Z');
+  const H = 36e5;
+  const mkc = (hoursAgo) => ({ sha: 'c' + hoursAgo, date: new Date(now - hoursAgo * H).toISOString() });
+  // del más nuevo al más viejo: 3 hoy, 2 ayer, 3 hace 10 días (mismo día), 2 hace 200 días
+  const list = [1, 2, 3, 30, 31, 240, 241, 242, 4800, 4801].map(mkc);
+  const keep = pickVersions(list, now, 90, 2).map((c) => c.sha);
+  assert.deepEqual(keep, ['c1', 'c2', 'c3', 'c30', 'c31', 'c240']);
+  // sin actividad en 200 días: se conserva al menos la última
+  assert.deepEqual(pickVersions([mkc(4800), mkc(4801)], now).map((c) => c.sha), ['c4800']);
+  ok('limpieza: todas las de 2 días, una por día hasta 90 días y nada más viejo (siempre la última)');
+}
+
+// 14. Limpieza del historial contra un GitHub falso
+{
+  const now = Date.parse('2026-11-26T12:00:00Z');
+  const commits = new Map();
+  let head = null;
+  const add = (sha, parent, hoursAgo, tree) => {
+    const d = new Date(now - hoursAgo * 36e5).toISOString();
+    commits.set(sha, { sha, parent, tree, message: 'sync', date: d });
+    head = sha;
+  };
+  add('a', null, 5000, 't-a'); add('b', 'a', 300, 't-b'); add('c', 'b', 299, 't-c'); add('d', 'c', 1, 't-d');
+  let n2 = 0;
+  let racer = null;
+  const posted = [];
+  const f = async (url, opts = {}) => {
+    const u = new URL(url);
+    const m = opts.method || 'GET';
+    if (u.pathname === '/repos/o/r/git/refs/heads/main') {
+      if (m === 'PATCH') { const b = JSON.parse(opts.body); head = b.sha; return resp(200, {}); }
+      const out = resp(200, { object: { sha: head } });
+      if (racer) { racer(); racer = null; }
+      return out;
+    }
+    if (u.pathname === '/repos/o/r/commits') {
+      const chain = [];
+      for (let s = u.searchParams.get('sha'); s; s = commits.get(s).parent) chain.push(commits.get(s));
+      const page = Number(u.searchParams.get('page') || 1);
+      return resp(200, chain.slice((page - 1) * 100, page * 100).map((c) => ({ sha: c.sha, commit: { tree: { sha: c.tree }, message: c.message, committer: { date: c.date }, author: { date: c.date } } })));
+    }
+    if (u.pathname === '/repos/o/r/git/commits' && m === 'POST') {
+      const b = JSON.parse(opts.body);
+      const sha = 'n' + ++n2;
+      posted.push(b);
+      commits.set(sha, { sha, parent: b.parents[0] || null, tree: b.tree, message: b.message, date: b.committer.date });
+      return resp(201, { sha });
+    }
+    return resp(404, {});
+  };
+  const g = createGithub({ owner: 'o', repo: 'r', token: 't', fetchFn: f });
+  const r1 = await g.compact({ now, delayMs: 0 });
+  assert.deepEqual([r1.changed, r1.before, r1.after], [true, 4, 2]);
+  const trees = [];
+  for (let s = head; s; s = commits.get(s).parent) trees.push(commits.get(s).tree);
+  assert.deepEqual(trees, ['t-d', 't-c'], 'quedan la de hoy y la última de hace ~12 días, con su contenido');
+  assert.deepEqual(posted.at(0).parents, []);
+  const r2 = await g.compact({ now, delayMs: 0 });
+  assert.equal(r2.changed, false, 'una segunda limpieza no hace nada');
+  // Si otro dispositivo sube algo durante la limpieza, se cancela sin mover la rama
+  add('e', head, 0.5, 't-e'); add('f', 'e', 5000, 't-f'); commits.get('f').parent = null; head = 'e'; commits.get('e').parent = 'f';
+  const headBefore = head;
+  let calls = 0;
+  racer = null;
+  const origPost = posted.length;
+  const g2 = createGithub({ owner: 'o', repo: 'r', token: 't', fetchFn: async (url, opts) => {
+    if (new URL(url).pathname.endsWith('/git/refs/heads/main') && (opts?.method || 'GET') === 'GET' && ++calls === 2) add('z', headBefore, 0.1, 't-z');
+    return f(url, opts);
+  } });
+  const r3 = await g2.compact({ now, delayMs: 0 });
+  assert.equal(r3.raced, true);
+  assert.equal(head, 'z', 'la rama queda con la subida del otro dispositivo');
+  assert.ok(posted.length > origPost);
+  ok('limpieza en GitHub: recrea solo las versiones conservadas y se cancela si otro dispositivo sube algo');
+}
 
 console.log(`\nTodas las pruebas pasaron (${n}).`);

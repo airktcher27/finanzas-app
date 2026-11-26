@@ -26,7 +26,8 @@
   <header class="top">
     <h1>Finanzas</h1>
     <div class="row">
-      <button id="btn-sync" class="btn primary" type="button" aria-label="Sincronizar">⟳ Sincronizar</button>
+      <button id="btn-sync" class="btn primary" type="button" aria-label="Sincronizar" title="Sincronizar">⟳<span class="lbl"> Sincronizar</span></button>
+      <button id="btn-privacy" class="btn icon" type="button" aria-label="Ocultar montos" aria-pressed="false" title="Ocultar montos"></button>
       <button id="btn-settings" class="btn icon" type="button" aria-label="Ajustes" title="Ajustes">⚙</button>
     </div>
   </header>
@@ -109,6 +110,9 @@
           <button id="px-clear" class="btn" type="button">Quitar clave</button>
         </div>
       </form>
+
+      <h2>Papelera y versiones</h2>
+      <div id="history-box"></div>
 
       <h2>Respaldo manual</h2>
       <p class="hint">Archivo cifrado con su propia contraseña. Sirve como copia de seguridad o para pasar datos sin internet.</p>

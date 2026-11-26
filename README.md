@@ -70,9 +70,42 @@ Crea una nota en la pestaña **Pruebas** en el PC, toca **Sincronizar**, y en el
 
 En Ajustes: **Exportar respaldo** descarga un archivo cifrado; **Importar respaldo** lo mezcla con lo que ya tienes. Haz uno de vez en cuando.
 
-## Actualizar la app
+## Actualizar la app (con git)
 
-Sube los archivos nuevos al repositorio `finanzas-app`. La versión nueva se ve al abrir la app por segunda vez (la primera carga sirve la copia guardada y actualiza por detrás).
+En vez de subir archivos uno por uno en la web de GitHub, publica con **git**: se sube todo de una vez, no se queda ningún archivo atrás y cada versión queda en el historial (si algo falla, puedes volver a la anterior).
+
+### Primera vez
+
+**En Linux (CachyOS/Arch) o Windows, con la terminal:**
+
+1. Instala git: `sudo pacman -S git` (CachyOS) o `winget install Git.Git` (Windows).
+2. Dile quién eres (una sola vez):
+   ```
+   git config --global user.name "Tu nombre"
+   git config --global user.email "tu-correo@ejemplo.com"
+   ```
+3. Descarga tu repositorio de la app a una carpeta:
+   - Si ya tienes una llave SSH en GitHub: `git clone git@github.com:TU-USUARIO/finanzas-app.git`
+   - Si no: instala la herramienta `gh` (`sudo pacman -S github-cli` o `winget install GitHub.cli`), corre `gh auth login` y luego `gh repo clone TU-USUARIO/finanzas-app`.
+
+**En Windows o Mac, sin terminal:** instala [GitHub Desktop](https://desktop.github.com), inicia sesión y usa **File → Clone repository → finanzas-app**.
+
+### Cada vez que te mande una versión nueva
+
+1. Descomprime el zip **encima** de la carpeta `finanzas-app` (reemplaza los archivos; no borres la carpeta oculta `.git`).
+2. Terminal:
+   ```
+   cd finanzas-app
+   git add -A
+   git commit -m "Fase 5"
+   git push
+   ```
+   GitHub Desktop: escribe un resumen abajo a la izquierda → **Commit to main** → **Push origin**.
+3. En uno o dos minutos GitHub Pages publica la versión nueva. Ábrela con internet en cada dispositivo.
+
+Para volver a una versión anterior de la app: `git revert HEAD` y `git push` (o, en GitHub Desktop, clic derecho sobre el último commit → *Revert changes in commit*).
+
+> **No clones el repositorio de datos (`finanzas-datos`)**: lo maneja la app y su historial se limpia solo; una copia local quedaría desfasada.
 
 ## Qué incluye la Fase 1
 
@@ -171,8 +204,33 @@ Al crear o editar una meta puedes ponerle un nombre (ej. "Fondo de emergencia");
 - **Ajustes → Vista** (se guarda en cada dispositivo, no se sincroniza): quitar las pestañas Movimientos, Inversiones, Deudas o Reportes; ocultar *Meta de ahorro* y *Vencimientos* del Resumen; y mostrar u ocultar el total de cada moneda. En el Resumen cada total tiene un botón *Ocultar* y, si hay uno oculto, aparece *Mostrar total en…*.
 - Ocultar solo cambia lo que ves: los datos siguen ahí. Un total oculto sigue contando dentro de tus cuentas e inversiones.
 
+## Fase 5: datos más livianos, papelera, versiones, temas y privacidad
+
+### Datos comprimidos y limpieza del historial
+- Cada sincronización guarda una versión del archivo cifrado en el repositorio de datos. Como lo cifrado no se puede comprimir, ahora la app **comprime antes de cifrar**: el archivo queda unas 6 veces más pequeño.
+- El formato comprimido solo se usa cuando **todos los dispositivos que han escrito en los últimos 60 días** ya tienen esta versión (cada uno se registra al abrir la app). Abre la app con internet en el PC y en el celular y, desde ese momento, el archivo sube comprimido. Las versiones viejas del archivo se siguen leyendo.
+- **Limpieza automática cada 30 días:** se conservan todas las versiones de los últimos 2 días y una por día hasta 90 días; las más viejas se borran del historial. GitHub tarda un tiempo en reflejar el espacio liberado. También puedes usar **Limpiar ahora** en Ajustes → *Papelera y versiones*, donde además ves el tamaño del repositorio.
+- Si otro dispositivo sube cambios justo durante la limpieza, la limpieza se cancela sin tocar nada y se intenta después.
+- Si tu token no tuviera permiso para reescribir el historial, la app sigue funcionando normal; solo no se limpia.
+
+### Papelera
+- Lo que eliminas (movimientos, cuentas, deudas, operaciones de inversión, metas) queda **30 días** en Ajustes → *Papelera*, de donde lo puedes **Recuperar**. Después se borra del todo.
+- Lo que se eliminó junto se recupera junto: una cuenta vuelve con sus movimientos, y las deudas u operaciones que la usaban vuelven a quedar asociadas a ella. Una deuda vuelve con sus abonos.
+- **Vaciar papelera** la borra de inmediato en todos tus dispositivos.
+
+### Versiones anteriores
+- Ajustes → *Versiones anteriores*: la lista de versiones guardadas, con fecha y hora. Al tocar una, la app la descarga, la descifra y te muestra cuántos movimientos, cuentas, deudas, operaciones y metas tenía, comparado con hoy.
+- **Restaurar esta versión** deja tus datos exactamente como estaban, en todos tus dispositivos. Antes guarda lo de hoy como otra versión, así que puedes deshacerlo restaurando esa.
+- No cambia la configuración de cada dispositivo (tema, vista, clave de precios).
+
+### Tema, color y privacidad (Ajustes → Vista, por dispositivo)
+- **Tema:** automático (según el sistema), claro u oscuro.
+- **Color:** verde, azul, morado, frambuesa, naranja o grafito. Todos tienen buen contraste en claro y en oscuro. Los gráficos mantienen sus colores.
+- **Modo privacidad:** el botón del ojo, junto a Ajustes, cambia todos los montos por `•••••` (tampoco se ven en verde o rojo) hasta que lo vuelvas a tocar. Los porcentajes y las cantidades de acciones siguen visibles, y al abrir un formulario para editar sí ves el monto real. Puedes elegir que la app **abra siempre con los montos ocultos**.
+- En celulares angostos el botón de sincronizar queda solo con el ícono ⟳.
+
 ## Pruebas
 
-- `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos y respaldo).
+- `node test-sync.mjs` (Node 18+): dos dispositivos y un GitHub falso (cifrado, contraseña incorrecta, ediciones, borrados, conflictos, respaldo, compresión y limpieza del historial).
 - `node test-invest.mjs`: posiciones, costo promedio, fracciones, ventas sin respaldo, patrimonio y lectura de respuestas de precios.
-- `node test-ledger.mjs`: lectura de montos (`12.500`, `1,234.56`…), saldos, totales del mes, filtros y resumen.
+- `node test-ledger.mjs`: lectura de montos (`12.500`, `1,234.56`…), saldos, totales del mes, filtros, resumen, papelera y restaurar versiones.

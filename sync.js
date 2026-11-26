@@ -6,6 +6,20 @@ import { SyncError } from './errors.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Dispositivos: cada versión nueva de la app se registra en los datos ({col:'dispositivos', caps:['gz']}).
+// Solo se sube el formato comprimido cuando TODOS los dispositivos que escribieron en los últimos
+// 60 días ya lo entienden; si no, uno desactualizado no podría leerlo.
+export const CAP_GZ = 'gz';
+export function canCompress(records, now, windowMs = 60 * 864e5) {
+  const devs = new Map(records.filter((r) => r.col === 'dispositivos' && !r.deleted).map((r) => [r.id, r]));
+  const writers = new Set(records.filter((r) => r.dev && r.updatedAt > now - windowMs).map((r) => r.dev));
+  for (const d of writers) {
+    const rec = devs.get(d);
+    if (!rec || !(rec.caps || []).includes(CAP_GZ)) return false;
+  }
+  return true;
+}
+
 async function keyForRemote(store, file, getPassphrase) {
   const cached = await store.getMeta('syncKey');
   if (cached && cached.salt === file.salt && cached.iter === file.iter) {
@@ -49,7 +63,7 @@ export async function runSync({ store, gh, getPassphrase, now = () => Date.now()
 
     let pushed = false;
     if (!remote || needsPush) {
-      const file = await encryptJson(k.key, k.salt, k.iter, { records: merged, savedAt: now() });
+      const file = await encryptJson(k.key, k.salt, k.iter, { records: merged, savedAt: now() }, { compress: canCompress(merged, now()) });
       try {
         await gh.put(JSON.stringify(file), remote ? remote.sha : undefined, `sync ${new Date(now()).toISOString()}`);
         pushed = true;
@@ -64,7 +78,7 @@ export async function runSync({ store, gh, getPassphrase, now = () => Date.now()
     }
 
     await store.setMeta('lastSync', now());
-    return { pulled: toLocal.length, pushed, total: merged.length };
+    return { pulled: toLocal.length, pushed, total: merged.length, records: merged };
   }
   throw new SyncError('CONFLICT', 'No se pudo sincronizar tras varios intentos. Intenta de nuevo.');
 }

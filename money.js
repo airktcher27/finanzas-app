@@ -29,7 +29,14 @@ export function parseAmount(input, cur, { signed = false } = {}) {
   return negative ? -minor : minor;
 }
 
+// Modo privacidad: todos los montos se muestran como •••••.
+let hidden = false;
+export function setMoneyHidden(v) { hidden = !!v; }
+export const moneyHidden = () => hidden;
+export const HIDDEN_MONEY = (cur) => `${cur === 'USD' ? 'US$' : '$'} •••••`;
+
 export function formatMoney(minor, cur) {
+  if (hidden) return HIDDEN_MONEY(cur);
   const d = dec(cur);
   return new Intl.NumberFormat('es-CO', {
     style: 'currency',

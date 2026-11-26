@@ -48,19 +48,36 @@ export async function deriveKey(passphrase, saltB64, iterations = ITERATIONS) {
   );
 }
 
-export async function encryptJson(key, saltB64, iterations, obj) {
+// gzip con las APIs del navegador (también existen en Node 18+).
+async function gzip(bytes, decompress) {
+  const stream = new Blob([bytes]).stream().pipeThrough(decompress ? new DecompressionStream('gzip') : new CompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// v1: JSON cifrado. v2 (compress): JSON comprimido con gzip y luego cifrado (~6 veces más pequeño).
+// Se comprime ANTES de cifrar porque lo cifrado ya no se puede comprimir.
+export async function encryptJson(key, saltB64, iterations, obj, { compress = false } = {}) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(obj)))
-  );
-  return { v: 1, kdf: 'PBKDF2-SHA256', iter: iterations, salt: saltB64, iv: b64encode(iv), data: b64encode(ct) };
+  let plain = enc.encode(JSON.stringify(obj));
+  if (compress) plain = await gzip(plain, false);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
+  const file = { v: compress ? 2 : 1, kdf: 'PBKDF2-SHA256', iter: iterations, salt: saltB64, iv: b64encode(iv), data: b64encode(ct) };
+  if (compress) file.z = 'gzip';
+  return file;
 }
 
 export async function decryptJson(key, file) {
+  let pt;
   try {
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64decode(file.iv) }, key, b64decode(file.data));
-    return JSON.parse(dec.decode(pt));
+    pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64decode(file.iv) }, key, b64decode(file.data)));
   } catch (e) {
     throw new SyncError('WRONG_KEY', 'Contraseña incorrecta (o el archivo está dañado).');
+  }
+  try {
+    if (file.z === 'gzip') pt = await gzip(pt, true);
+    else if (file.z) throw new Error('formato');
+    return JSON.parse(dec.decode(pt));
+  } catch (e) {
+    throw new SyncError('BAD_FILE', 'El archivo de datos tiene un formato que esta versión no entiende. Actualiza la app.');
   }
 }

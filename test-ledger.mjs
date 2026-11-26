@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseAmount, formatMoney, toInput } from './money.js';
+import { trashGroups, purgeable, restorePlan, versionSummary } from './trash.js';
 import { debtsByPerson, personKey, accountBalances, filterMovs, monthTotals, netSummary, shiftMonth, todayStr } from './ledger.js';
 
 let n = 0;
@@ -327,5 +328,54 @@ assert.deepEqual(juan.byCur.COP, { toMe: 60000, iOwe: 30000, net: 30000 });
 assert.equal(juan.count, 2);
 assert.deepEqual(byP.find((q) => q.key === 'ana').byCur, { USD: { toMe: 5000, iOwe: 0, net: 5000 } });
 ok('deudas por persona: agrupa nombres iguales, descuenta abonos, ignora saldadas y separa monedas');
+
+// --- papelera ---
+{
+  const now = Date.parse('2026-11-26T12:00:00Z');
+  const day = 864e5;
+  const all = [
+    { col: 'movs', id: 'm1', amount: 5000, deleted: true, updatedAt: now - day },
+    { col: 'cuentas', id: 'c1', name: 'Temporal', deleted: true, trash: 'g1', updatedAt: now - 2 * day },
+    { col: 'movs', id: 'm2', amount: 100, deleted: true, trash: 'g1', updatedAt: now - 2 * day },
+    { col: 'movs', id: 'm3', amount: 7, deleted: true, updatedAt: now - 40 * day },
+    { col: 'movs', id: 'm4', deleted: true, updatedAt: now - day },                 // ya purgado: sin datos
+    { col: 'presupuestos', id: 'b1', amount: 1, deleted: true, updatedAt: now },    // no se muestra
+    { col: 'movs', id: 'm5', amount: 1, deleted: false, updatedAt: now },
+  ];
+  const g = trashGroups(all, now);
+  assert.deepEqual(g.map((x) => x.key), ['movs/m1', 'g1']);
+  assert.equal(g[1].main.col, 'cuentas');
+  assert.equal(g[1].items.length, 2);
+  assert.deepEqual(purgeable(all, now).map((r) => r.id), ['m3']);
+  assert.deepEqual(purgeable(all, now)[0], { col: 'movs', id: 'm3', updatedAt: now - 40 * day, dev: undefined, deleted: true });
+  assert.deepEqual(purgeable(all, now, true).map((r) => r.id).sort(), ['c1', 'm1', 'm2', 'm3']);
+  ok('papelera: agrupa lo borrado junto, ignora lo vencido o ya purgado, y purga a los 30 días');
+}
+// --- restaurar versión ---
+{
+  const version = [
+    { col: 'movs', id: 'a', amount: 1, deleted: false },
+    { col: 'movs', id: 'b', amount: 2, deleted: true },
+    { col: 'dispositivos', id: 'pc', version: 'viejo' },
+    { col: 'config', id: 'compactacion', at: 1 },
+  ];
+  const current = [
+    { col: 'movs', id: 'a', amount: 99, deleted: false },
+    { col: 'movs', id: 'b', amount: 2, deleted: false },
+    { col: 'movs', id: 'c', amount: 3, deleted: false },
+    { col: 'movs', id: 'd', amount: 4, deleted: true },
+    { col: 'dispositivos', id: 'pc', version: 'nuevo' },
+  ];
+  const plan = restorePlan(current, version);
+  const by = Object.fromEntries(plan.map((r) => [`${r.col}/${r.id}`, r]));
+  assert.equal(by['movs/a'].amount, 1);
+  assert.equal(by['movs/b'].deleted, true);
+  assert.equal(by['movs/c'].deleted, true);
+  assert.equal(by['movs/d'], undefined);
+  assert.equal(by['dispositivos/pc'], undefined);
+  assert.equal(by['config/compactacion'], undefined);
+  assert.deepEqual(versionSummary(version), { movs: 1, cuentas: 0, deudas: 0, inv: 0, metas: 0 });
+  ok('restaurar versión: vuelve cada registro a como estaba, elimina lo creado después y no toca datos internos');
+}
 
 console.log(`\nTodas las pruebas pasaron (${n}).`);

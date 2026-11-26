@@ -1,7 +1,7 @@
 // Gráficos propios en SVG/HTML, sin librerías. Colores y tipografía salen de variables CSS
 // (--s1, --s2, --grid, --axis, --card, --text, --muted) para que sigan el tema claro/oscuro.
 // Los nombres que vienen de los datos siempre se insertan con textContent.
-import { formatMoney, dec } from './money.js';
+import { formatMoney, dec, moneyHidden, HIDDEN_MONEY } from './money.js';
 import { niceTicks } from './ledger.js';
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -37,6 +37,7 @@ function s(tag, attrs, ...kids) {
 
 // $ 1,2 M · $ 350 mil · US$ 12 …  (el signo va delante del símbolo)
 export function compactMoney(minor, cur) {
+  if (moneyHidden()) return HIDDEN_MONEY(cur);
   const v = (minor || 0) / 10 ** dec(cur);
   const a = Math.abs(v);
   const fmt = (x) => new Intl.NumberFormat('es-CO', { maximumFractionDigits: 1 }).format(x);
