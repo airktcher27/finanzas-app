@@ -2,10 +2,10 @@
 import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 import assert from 'node:assert/strict';
-import { runSync, exportEncrypted, importEncrypted, canCompress } from './sync.js';
-import { createGithub, pickVersions } from './github.js';
-import { encryptJson, decryptJson, deriveKey, newSalt } from './crypto.js';
-import { SyncError } from './errors.js';
+import { runSync, exportEncrypted, importEncrypted, canCompress } from './comun/sync.js';
+import { createGithub, pickVersions } from './comun/github.js';
+import { encryptJson, decryptJson, deriveKey, newSalt } from './comun/crypto.js';
+import { SyncError } from './comun/errors.js';
 
 function memStore() {
   const recs = new Map();

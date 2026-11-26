@@ -2,6 +2,12 @@
 
 App web instalable (PWA) que guarda tus datos en el dispositivo y los sincroniza entre PC y celular mediante **un archivo cifrado en un repositorio privado de GitHub**. No hay servidor propio ni nada encendido 24/7.
 
+> **0.11.1 · Módulo común.** El motor de sincronización (`crypto.js`, `github.js`, `merge.js`, `sync.js`, `store.js`, `errors.js`)
+> se movió a la carpeta **`comun/`**, que es la misma en todas tus apps (también la usa *Semestre*). No cambia nada para ti:
+> mismo formato de archivo, mismos datos, misma contraseña. Detalles en `comun/LEEME.md`.
+> Si subes por la web de GitHub: arrastra también la carpeta `comun/` y borra del repo los seis archivos viejos de la raíz
+> (`crypto.js`, `github.js`, `merge.js`, `sync.js`, `store.js`, `errors.js`). Con git (`git add -A`) se borran solos.
+
 ## Probar en tu PC antes de publicar
 
 **No abras `index.html` con doble clic**: el navegador bloquea los módulos y el cifrado en `file://` y no funciona nada. En su lugar, dentro de la carpeta:

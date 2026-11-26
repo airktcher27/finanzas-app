@@ -1,10 +1,10 @@
-import { openStore } from './store.js';
-import { createGithub } from './github.js';
-import { runSync, exportEncrypted, importEncrypted, CAP_GZ } from './sync.js';
-import { decryptJson, deriveKey } from './crypto.js';
+import { openStore } from './comun/store.js';
+import { createGithub } from './comun/github.js';
+import { runSync, exportEncrypted, importEncrypted, CAP_GZ } from './comun/sync.js';
+import { decryptJson, deriveKey } from './comun/crypto.js';
 import { decodeBytes, parseCSV, guessMapping, buildRows, markDuplicates, merchantKey, ruleFor } from './importer.js';
 import { trashGroups, purgeable, restorePlan, versionSummary, TRASH_DAYS } from './trash.js';
-import { SyncError } from './errors.js';
+import { SyncError } from './comun/errors.js';
 import { parseAmount, formatMoney, toInput, dec, CURRENCIES, setMoneyHidden, moneyHidden } from './money.js';
 import {
   live, accountBalances, filterMovs, monthTotals, netSummary, todayStr, monthOf, shiftMonth,
@@ -18,7 +18,7 @@ import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTi
 import { BENCHMARKS, benchName, actualResult, benchmarkResult, sampleDates, historyLines, allocation, contributionPlan, OTHER } from './portfolio.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.11.0 (Fase 7)';
+const VERSION = '0.11.1 (Fase 7)';
 const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
