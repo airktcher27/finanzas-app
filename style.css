@@ -60,6 +60,14 @@
   --axis: #383835;
   --good-text: #0ca30c;
 }
+/* Negro: el oscuro con fondo negro puro para pantallas OLED (los píxeles negros se apagan). */
+:root[data-theme="dark"][data-negro] {
+  --bg: #000000;
+  --card: #0f1315;
+  --border: #232b2f;
+  --grid: #232321;
+  --axis: #2e2e2b;
+}
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }

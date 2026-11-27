@@ -18,7 +18,7 @@ import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTi
 import { BENCHMARKS, benchName, actualResult, benchmarkResult, sampleDates, historyLines, allocation, contributionPlan, OTHER } from './portfolio.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.11.1 (Fase 7)';
+const VERSION = '0.11.2 (Fase 7)';
 const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);
@@ -298,7 +298,7 @@ function getView() {
   try { v = JSON.parse(localStorage.getItem(VIEW_KEY)); } catch { /* sin almacenamiento */ }
   return { hiddenTabs: [], hiddenSections: [], hiddenCurrencies: [], ...(v || {}) };
 }
-// Apariencia: tema (auto/claro/oscuro) y paleta del color principal. Contrastes revisados (≥ 4,5:1)
+// Apariencia: tema (auto/claro/oscuro/negro) y paleta del color principal. Contrastes revisados (≥ 4,5:1)
 // para texto sobre el botón y para el color sobre el fondo, en claro y en oscuro.
 const PALETTES = {
   verde: { name: 'Verde', light: ['#0f766e', '#ffffff'], dark: ['#2dd4bf', '#05211e'] },
@@ -309,18 +309,22 @@ const PALETTES = {
   grafito: { name: 'Grafito', light: ['#334155', '#ffffff'], dark: ['#cbd5e1', '#0f172a'] },
 };
 const darkMQ = matchMedia('(prefers-color-scheme: dark)');
+// 'black' (Negro) es el oscuro con fondo negro puro para pantallas OLED: data-theme="dark" + data-negro.
+const isDark = (v) => v.theme === 'dark' || v.theme === 'black' || (v.theme !== 'light' && darkMQ.matches);
 function applyTheme() {
   const v = getView();
   const root = document.documentElement;
   if (v.theme === 'light' || v.theme === 'dark') root.dataset.theme = v.theme;
+  else if (v.theme === 'black') root.dataset.theme = 'dark';
   else delete root.dataset.theme;
-  const dark = v.theme === 'dark' || (v.theme !== 'light' && darkMQ.matches);
+  root.toggleAttribute('data-negro', v.theme === 'black');
+  const dark = isDark(v);
   const p = PALETTES[v.palette] || PALETTES.verde;
   const [acc, accText] = dark ? p.dark : p.light;
   root.style.setProperty('--accent', acc);
   root.style.setProperty('--accent-text', accText);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = dark ? '#101416' : acc;
+  if (meta) meta.content = v.theme === 'black' ? '#000000' : dark ? '#101416' : acc;
 }
 darkMQ.addEventListener('change', () => { applyTheme(); if (ui.tab === 'reportes') render(); });
 
@@ -354,10 +358,10 @@ function renderViewPrefs() {
   const seg = (opts, cur, onpick) => h('div', { class: 'seg', role: 'group', style: `grid-template-columns:repeat(${opts.length},1fr)` },
     opts.map(([k, label]) => h('button', { type: 'button', class: k === cur ? 'on' : '', 'aria-pressed': String(k === cur), text: label, onclick: () => onpick(k) })));
   const pal = v.palette && PALETTES[v.palette] ? v.palette : 'verde';
-  const dark = v.theme === 'dark' || (v.theme !== 'light' && darkMQ.matches);
+  const dark = isDark(v);
   root.replaceChildren(...[
     h('div', { class: 'section-title', text: 'Tema' }),
-    seg([['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro']], v.theme || 'auto', (k) => setView({ theme: k })),
+    seg([['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro'], ['black', 'Negro']], v.theme || 'auto', (k) => setView({ theme: k })),
     h('div', { class: 'section-title', text: 'Color' }),
     h('div', { class: 'swatches', role: 'radiogroup', 'aria-label': 'Color principal' }, Object.entries(PALETTES).map(([k, p]) =>
       h('button', { type: 'button', class: 'swatch' + (k === pal ? ' on' : ''), role: 'radio', 'aria-checked': String(k === pal), title: p.name, 'aria-label': p.name,

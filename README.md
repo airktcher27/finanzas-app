@@ -2,6 +2,9 @@
 
 App web instalable (PWA) que guarda tus datos en el dispositivo y los sincroniza entre PC y celular mediante **un archivo cifrado en un repositorio privado de GitHub**. No hay servidor propio ni nada encendido 24/7.
 
+> **0.11.2 · Tema Negro.** En Ajustes → Vista, además de automático, claro y oscuro, está *Negro*: fondo negro puro para
+> pantallas OLED como la del celular. Como el resto de la vista, se elige en cada dispositivo.
+
 > **0.11.1 · Módulo común.** El motor de sincronización (`crypto.js`, `github.js`, `merge.js`, `sync.js`, `store.js`, `errors.js`)
 > se movió a la carpeta **`comun/`**, que es la misma en todas tus apps (también la usa *Semestre*). No cambia nada para ti:
 > mismo formato de archivo, mismos datos, misma contraseña. Detalles en `comun/LEEME.md`.
@@ -230,7 +233,7 @@ Al crear o editar una meta puedes ponerle un nombre (ej. "Fondo de emergencia");
 - No cambia la configuración de cada dispositivo (tema, vista, clave de precios).
 
 ### Tema, color y privacidad (Ajustes → Vista, por dispositivo)
-- **Tema:** automático (según el sistema), claro u oscuro.
+- **Tema:** automático (según el sistema), claro, oscuro o **negro** (fondo negro puro, para pantallas OLED como la del celular).
 - **Color:** verde, azul, morado, frambuesa, naranja o grafito. Todos tienen buen contraste en claro y en oscuro. Los gráficos mantienen sus colores.
 - **Modo privacidad:** el botón del ojo, junto a Ajustes, cambia todos los montos por `•••••` (tampoco se ven en verde o rojo) hasta que lo vuelvas a tocar. Los porcentajes y las cantidades de acciones siguen visibles, y al abrir un formulario para editar sí ves el monto real. Puedes elegir que la app **abra siempre con los montos ocultos**.
 - En celulares angostos el botón de sincronizar queda solo con el ícono ⟳.
