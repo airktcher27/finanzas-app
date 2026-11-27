@@ -18,7 +18,7 @@ import { rankedBars, groupedColumns, lineChart, columnsTarget, tableView, hideTi
 import { BENCHMARKS, benchName, actualResult, benchmarkResult, sampleDates, historyLines, allocation, contributionPlan, OTHER } from './portfolio.js';
 import { DEFAULT_CATEGORIES, SUGGESTED_ACCOUNTS, ACCOUNT_TYPES } from './defaults.js';
 
-const VERSION = '0.11.2 (Fase 7)';
+const VERSION = '0.11.3 (Fase 7)';
 const PX_KEY = 'finanzas.twelve';
 const CFG_KEY = 'finanzas.cfg';
 const $ = (s) => document.querySelector(s);

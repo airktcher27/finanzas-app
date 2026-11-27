@@ -2,6 +2,8 @@
 
 App web instalable (PWA) que guarda tus datos en el dispositivo y los sincroniza entre PC y celular mediante **un archivo cifrado en un repositorio privado de GitHub**. No hay servidor propio ni nada encendido 24/7.
 
+> **0.11.3 · Arreglo.** Al actualizarse, la app ya no borra la copia sin conexión de tus otras apps (todas viven en el mismo sitio).
+
 > **0.11.2 · Tema Negro.** En Ajustes → Vista, además de automático, claro y oscuro, está *Negro*: fondo negro puro para
 > pantallas OLED como la del celular. Como el resto de la vista, se elige en cada dispositivo.
 

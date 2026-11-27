@@ -1,6 +1,6 @@
 // Service worker: la app abre sin internet.
 // Con conexión siempre pide la versión más reciente; sin conexión usa la copia guardada.
-const CACHE = 'finanzas-v0.11.2';
+const CACHE = 'finanzas-v0.11.3';
 const ASSETS = [
   './', './index.html', './style.css', './app.js', './comun/store.js', './comun/crypto.js', './comun/merge.js',
   './comun/github.js', './comun/sync.js', './comun/errors.js', './money.js', './ledger.js', './defaults.js', './charts.js', './invest.js', './prices.js', './trash.js', './importer.js', './portfolio.js', './vendor/xlsx.full.min.js',
@@ -12,10 +12,11 @@ self.addEventListener('install', (e) => {
   self.skipWaiting();
 });
 
+// Todas tus apps comparten el mismo origen (airktcher27.github.io): solo se borran las cachés viejas de ESTA app.
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k.startsWith('finanzas-')).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
